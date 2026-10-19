@@ -31,6 +31,7 @@ class MediaStoreRepository(private val context: Context) {
         MediaStore.Audio.Media.YEAR,
         MediaStore.Audio.Media.TRACK,
         MediaStore.Audio.Media.DATE_ADDED,
+        MediaStore.Audio.Media.DATE_MODIFIED,
     )
 
     private val selection =
@@ -51,6 +52,7 @@ class MediaStoreRepository(private val context: Context) {
                 val yearCol = cursor.getColumnIndex(MediaStore.Audio.Media.YEAR)
                 val trackCol = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
                 val dateCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
+                val modifiedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
 
                 while (cursor.moveToNext()) {
                     val id = cursor.longAt(idCol)
@@ -67,6 +69,7 @@ class MediaStoreRepository(private val context: Context) {
                         year = cursor.intAt(yearCol),
                         trackNumber = cursor.intAt(trackCol),
                         dateAdded = cursor.longAt(dateCol),
+                        dateModified = cursor.longAt(modifiedCol),
                     )
                 }
             }
@@ -76,6 +79,38 @@ class MediaStoreRepository(private val context: Context) {
             // Some OEM providers reject the projection; return what we have.
         }
         tracks
+    }
+
+    /**
+     * Fingerprint of the audio index without reading a single track row.
+     *
+     * [loadTracks] materialises ten columns per row and costs hundreds of
+     * milliseconds on a large library. "How many rows, and how new is the newest
+     * modification" answers the only question that matters on launch — whether the
+     * cached snapshot is still valid — and both aggregates are answered from the
+     * index. Deleting a file moves the count, adding or re-tagging one moves the
+     * watermark.
+     *
+     * Returns null when the provider rejects the aggregate projection (some OEM
+     * ROMs do); the caller then falls back to a full scan, i.e. the old behaviour.
+     */
+    suspend fun fingerprint(): IndexFingerprint? = withContext(Dispatchers.IO) {
+        runCatching {
+            val columns = arrayOf(
+                "COUNT(*) AS track_count",
+                "MAX(${MediaStore.Audio.Media.DATE_MODIFIED}) AS newest_modified",
+            )
+            context.contentResolver.query(collection, columns, selection, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) {
+                    null
+                } else {
+                    IndexFingerprint(
+                        count = cursor.getLong(0),
+                        newestModified = if (cursor.isNull(1)) 0L else cursor.getLong(1),
+                    )
+                }
+            }
+        }.getOrNull()
     }
 
     private fun Cursor.stringAt(index: Int): String =
@@ -91,3 +126,12 @@ class MediaStoreRepository(private val context: Context) {
         private const val MIN_DURATION_MS = 60_000L
     }
 }
+
+/**
+ * Identity of a MediaStore snapshot: how many tracks match the selection, and the
+ * newest `DATE_MODIFIED` among them.
+ */
+data class IndexFingerprint(
+    val count: Long,
+    val newestModified: Long,
+)

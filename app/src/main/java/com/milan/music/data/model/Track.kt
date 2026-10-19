@@ -17,6 +17,14 @@ data class Track(
     val year: Int,
     val trackNumber: Int,
     val dateAdded: Long,
+    /**
+     * MediaStore `DATE_MODIFIED`, carried as the library-scan watermark.
+     *
+     * Defaults to 0 so a cache written before this field existed decodes without
+     * error; such a snapshot simply fails the watermark comparison once and gets
+     * rewritten on the next scan.
+     */
+    val dateModified: Long = 0L,
 ) {
     val displayTitle: String
         get() = title.ifBlank { "未知曲目" }

@@ -1,5 +1,6 @@
 package com.milan.music.data.media
 
+import android.content.ComponentCallbacks2
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
@@ -41,16 +42,20 @@ import kotlin.math.max
  */
 class ArtworkRepository(private val context: Context) {
 
-    /** List thumbnails, keyed by albumId. */
-    private val cache = object : LruCache<Long, ImageBitmap>(CACHE_BYTES) {
-        override fun sizeOf(key: Long, value: ImageBitmap): Int =
-            value.width * value.height * BYTES_PER_PIXEL
+    /**
+     * List thumbnails, keyed by albumId.
+     *
+     * Stored as [Bitmap] rather than [ImageBitmap] so `sizeOf` can report
+     * `allocationByteCount`: MediaProvider is free to answer `loadThumbnail` with a
+     * HARDWARE bitmap, whose real footprint bears no relation to `w * h * 4`.
+     */
+    private val cache = object : LruCache<Long, Bitmap>(CACHE_BYTES) {
+        override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
     /** Trimmed player-screen artwork, keyed by albumId. Few albums are viewed at once. */
-    private val playerCache = object : LruCache<Long, ImageBitmap>(PLAYER_CACHE_BYTES) {
-        override fun sizeOf(key: Long, value: ImageBitmap): Int =
-            value.width * value.height * BYTES_PER_PIXEL
+    private val playerCache = object : LruCache<Long, Bitmap>(PLAYER_CACHE_BYTES) {
+        override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
     /** De-duplicates concurrent requests for the same album while scrolling fast. */
@@ -58,17 +63,16 @@ class ArtworkRepository(private val context: Context) {
     private val pendingPlayer = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
 
     suspend fun load(track: Track): ImageBitmap? {
-        cache.get(track.albumId)?.let { return it }
+        cache.get(track.albumId)?.let { return it.asImageBitmap() }
 
         val own = CompletableDeferred<ImageBitmap?>()
         pending.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
 
         var result: ImageBitmap? = null
         try {
-            result = withContext(Dispatchers.IO) {
-                decodeBitmap(track, LIST_THUMB_SIZE)?.asImageBitmap()
-            }
-            if (result != null) cache.put(track.albumId, result)
+            val decoded = withContext(Dispatchers.IO) { decodeBitmap(track, LIST_THUMB_SIZE) }
+            if (decoded != null) cache.put(track.albumId, decoded)
+            result = decoded?.asImageBitmap()
             return result
         } finally {
             pending.remove(track.albumId)
@@ -85,17 +89,18 @@ class ArtworkRepository(private val context: Context) {
      * switching tracks within one album must not re-decode and re-scan 512×512 px.
      */
     suspend fun loadPlayerArtwork(track: Track): ImageBitmap? {
-        playerCache.get(track.albumId)?.let { return it }
+        playerCache.get(track.albumId)?.let { return it.asImageBitmap() }
 
         val own = CompletableDeferred<ImageBitmap?>()
         pendingPlayer.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
 
         var result: ImageBitmap? = null
         try {
-            result = withContext(Dispatchers.IO) {
-                decodeBitmap(track, PLAYER_THUMB_SIZE)?.let(::trimLightMargins)?.asImageBitmap()
+            val decoded = withContext(Dispatchers.IO) {
+                decodeBitmap(track, PLAYER_THUMB_SIZE)?.let(::trimLightMargins)
             }
-            if (result != null) playerCache.put(track.albumId, result)
+            if (decoded != null) playerCache.put(track.albumId, decoded)
+            result = decoded?.asImageBitmap()
             return result
         } finally {
             pendingPlayer.remove(track.albumId)
@@ -113,7 +118,48 @@ class ArtworkRepository(private val context: Context) {
         decodeBitmap(track, BACKDROP_SIZE)?.asImageBitmap()
     }
 
-    fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)
+    fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
+
+    /**
+     * Releases cached covers when the process is told to shed memory.
+     *
+     * [LruCache] only evicts on `put()`, so without this hook the list cache sits
+     * pinned at its 24 MB ceiling for as long as the process lives — including while
+     * the app is in the background, where the only artwork on screen is the mini
+     * player's and the notification's. Trimming on `UI_HIDDEN` is the cheapest large
+     * win available here: the covers rebuild from MediaProvider (local, no network)
+     * on the next scroll.
+     *
+     * Only `UI_HIDDEN` (20) and `BACKGROUND` (40) are still delivered: API 34
+     * deprecated `RUNNING_*` and API 35 deprecated `MODERATE`/`COMPLETE`, and the
+     * platform stopped sending them. The `RUNNING_LOW` branch is kept for API 26-33
+     * devices, where it is the only pre-background warning that exists.
+     */
+    @Suppress("DEPRECATION")
+    fun onTrimMemory(level: Int) {
+        when {
+            // BACKGROUND and anything numerically harsher: nothing of ours is visible.
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> evictAll()
+            // UI_HIDDEN: the app left the foreground. Keep roughly one screenful of
+            // list covers and drop the player-sized ones entirely.
+            level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> {
+                cache.trimToSize(cache.maxSize() / 6)
+                playerCache.evictAll()
+            }
+            // RUNNING_LOW / RUNNING_CRITICAL (API 26-33): still foreground, but the
+            // process is under pressure. Shrink both, never empty them.
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                cache.trimToSize(cache.maxSize() / 8)
+                playerCache.trimToSize(playerCache.maxSize() / 8)
+            }
+        }
+    }
+
+    /** Drops every cached cover. They are all re-decodable from local storage. */
+    fun evictAll() {
+        cache.evictAll()
+        playerCache.evictAll()
+    }
 
     private fun decodeBitmap(track: Track, size: Int): Bitmap? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -139,12 +185,16 @@ class ArtworkRepository(private val context: Context) {
      * least [MIN_KEEP_FRACTION] of the original area in both axes.
      */
     private fun trimLightMargins(source: Bitmap): Bitmap {
-        val width = source.width
-        val height = source.height
-        if (width < 32 || height < 32) return source
+        // getPixels() throws on a HARDWARE bitmap and MediaProvider may return one, so
+        // the pixel reads below would abort the coroutine. The copy costs one readback
+        // per album (the result is cached) and keeps every later consumer legal too.
+        val image = source.softwareCopy()
+        val width = image.width
+        val height = image.height
+        if (width < 32 || height < 32) return image
 
         val pixels = IntArray(width * height)
-        source.getPixels(pixels, 0, width, 0, 0, width, height)
+        image.getPixels(pixels, 0, width, 0, 0, width, height)
 
         fun isLight(x: Int, y: Int): Boolean {
             val color = pixels[y * width + x]
@@ -182,14 +232,28 @@ class ArtworkRepository(private val context: Context) {
         val trimmedWidth = right - left + 1
         val trimmedHeight = bottom - top + 1
         if (trimmedWidth < width * MIN_KEEP_FRACTION || trimmedHeight < height * MIN_KEEP_FRACTION) {
-            return source
+            return image
         }
-        if (trimmedWidth == width && trimmedHeight == height) return source
+        if (trimmedWidth == width && trimmedHeight == height) return image
 
         return runCatching {
-            Bitmap.createBitmap(source, left, top, max(1, trimmedWidth), max(1, trimmedHeight))
-        }.getOrDefault(source)
+            Bitmap.createBitmap(image, left, top, max(1, trimmedWidth), max(1, trimmedHeight))
+        }.getOrDefault(image)
     }
+
+    /**
+     * Returns a bitmap whose pixels are readable from Java.
+     *
+     * `Bitmap.Config.HARDWARE` (API 26+) keeps pixels in graphics memory: `getPixels`
+     * throws `IllegalStateException` on it. MediaProvider may hand one back from
+     * `loadThumbnail`, and nothing in the type system says which it chose.
+     */
+    private fun Bitmap.softwareCopy(): Bitmap =
+        if (config == Bitmap.Config.HARDWARE) {
+            copy(Bitmap.Config.ARGB_8888, false) ?: this
+        } else {
+            this
+        }
 
     private fun albumArtUri(albumId: Long): Uri =
         ContentUris.withAppendedId(
@@ -203,7 +267,6 @@ class ArtworkRepository(private val context: Context) {
         /** The player renders the cover full-width, so it keeps the larger source. */
         private const val PLAYER_THUMB_SIZE = 512
         private const val BACKDROP_SIZE = 96
-        private const val BYTES_PER_PIXEL = 4
         private const val CACHE_BYTES = 24 * 1024 * 1024
         private const val PLAYER_CACHE_BYTES = 6 * 1024 * 1024
         private const val LIGHT_THRESHOLD = 236

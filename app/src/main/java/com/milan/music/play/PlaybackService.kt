@@ -123,6 +123,19 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /**
+     * Forwards trim signals to the session's artwork cache.
+     *
+     * The service owns that cache, so the [android.app.Application] hook cannot reach
+     * it; services receive [android.content.ComponentCallbacks2] callbacks directly
+     * and this is the only way the notification bitmaps ever shrink while a paused
+     * queue keeps the service alive.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        artworkLoader?.onTrimMemory(level)
+    }
+
     override fun onDestroy() {
         mediaSession?.let { session ->
             session.player.release()

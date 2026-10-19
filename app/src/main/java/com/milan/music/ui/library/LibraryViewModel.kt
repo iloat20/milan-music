@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.milan.music.data.media.IndexFingerprint
 import com.milan.music.data.media.LibraryCacheStore
 import com.milan.music.data.media.MediaStoreRepository
 import com.milan.music.data.model.SortMode
@@ -138,9 +139,13 @@ class LibraryViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LibraryUiState())
 
     /**
-     * Paints the cached snapshot instantly, then silently reconciles it against the
-     * media index. The list is only swapped when the track set actually changed, so
-     * a normal launch neither waits on MediaStore nor flickers.
+     * Paints the cached snapshot instantly, then reconciles it against the media
+     * index — but only when the index actually changed.
+     *
+     * The reconciliation used to run on every cold start, so the cache only saved the
+     * first frame, not the scan: a 5k-track library paid 200-800 ms of cursor work on
+     * each launch even when nothing had been added. The fingerprint comparison makes
+     * the common case (nothing changed) cost one aggregate query.
      */
     fun ensureLoaded() {
         if (cacheLoaded) return
@@ -150,6 +155,15 @@ class LibraryViewModel(
             if (cached.isNotEmpty()) {
                 allTracks.value = cached
                 loading.value = false
+
+                // Deleting a file moves the row count; adding or re-tagging one moves
+                // the newest DATE_MODIFIED. A snapshot can therefore only look
+                // unchanged when nothing the user would notice has changed.
+                val watermark = IndexFingerprint(
+                    count = cached.size.toLong(),
+                    newestModified = cached.maxOf { it.dateModified },
+                )
+                if (mediaStore.fingerprint() == watermark) return@launch
             }
 
             val fresh = mediaStore.loadTracks()
@@ -166,8 +180,12 @@ class LibraryViewModel(
 
             if (cachedIds != freshIds) {
                 allTracks.value = fresh
-                libraryCache.save(fresh)
             }
+            // Saved even when the ids match: the payload also carries the watermark,
+            // and this is what lets the next launch skip the scan. A cache written
+            // before `dateModified` existed has 0 for every row, so it fails the
+            // comparison exactly once and heals here.
+            libraryCache.save(fresh)
 
             loading.value = false
         }

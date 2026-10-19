@@ -12,6 +12,7 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
+import android.util.LruCache
 import android.widget.RemoteViews
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.core.graphics.createBitmap
@@ -19,6 +20,7 @@ import androidx.core.graphics.scale
 import com.milan.music.MainActivity
 import com.milan.music.MilanMusicApp
 import com.milan.music.R
+import com.milan.music.data.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,6 +42,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
         appWidgetIds: IntArray,
     ) {
         val pending = goAsync()
+        instanceFlag = true
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 appWidgetIds.forEach { widgetId ->
@@ -105,17 +108,8 @@ class MusicWidgetProvider : AppWidgetProvider() {
         val views = RemoteViews(context.packageName, R.layout.widget_music)
 
         if (track != null) {
-            val bitmap = app.container.artwork.load(track)?.asAndroidBitmap()
-            if (bitmap != null) {
-                // Corners are rounded here, in the app process, because on API 26-30
-                // `clipToOutline` is a no-op in RemoteViews and the only reflective
-                // fix (setClipToOutline) is not on the launcher's method whitelist —
-                // calling it fails the whole update. Pre-clipping the bitmap keeps
-                // the shape identical on every supported version.
-                val cover = bitmap.scale(COVER_SIZE, COVER_SIZE)
-                    .withRoundedCorners(cardCornerRadiusPx(manager, widgetId))
-                views.setImageViewBitmap(R.id.widget_cover, cover)
-            }
+            val cover = coverFor(context, track, cardCornerRadiusPx(manager, widgetId))
+            if (cover != null) views.setImageViewBitmap(R.id.widget_cover, cover)
             views.setTextViewText(R.id.widget_title, track.displayTitle)
         } else {
             views.setTextViewText(R.id.widget_title, context.getString(R.string.app_name))
@@ -147,6 +141,44 @@ class MusicWidgetProvider : AppWidgetProvider() {
         val referenceWidthDp = (widthDp.takeIf { it > 0 } ?: FALLBACK_CARD_WIDTH_DP).toFloat()
         return (CARD_RADIUS_DP / referenceWidthDp * COVER_SIZE)
             .coerceIn(0f, COVER_SIZE / 2f)
+    }
+
+    /**
+     * 256 px rounded cover for one album, reused across refreshes.
+     *
+     * Corners are rounded here, in the app process, because on API 26-30
+     * `clipToOutline` is a no-op in RemoteViews and the only reflective fix
+     * (setClipToOutline) is not on the launcher's method whitelist — calling it fails
+     * the whole update. Pre-clipping keeps the shape identical on every version.
+     *
+     * The result is cached per (albumId, corner radius): a refresh previously
+     * allocated twice — `scale()` and then a second full bitmap inside
+     * [withRoundedCorners] — for artwork that only changes when the track does. The
+     * radius is part of the key because it derives from the launcher's cell width,
+     * which differs between instances.
+     */
+    private suspend fun coverFor(
+        context: Context,
+        track: Track,
+        radiusPx: Float,
+    ): Bitmap? {
+        val key = coverKey(track.albumId, radiusPx)
+        coverCache.get(key)?.let { return it }
+        val app = context.applicationContext as? MilanMusicApp ?: return null
+        val bitmap = app.container.artwork.load(track)?.asAndroidBitmap() ?: return null
+        return bitmap.scale(COVER_SIZE, COVER_SIZE)
+            .withRoundedCorners(radiusPx)
+            .also { coverCache.put(key, it) }
+    }
+
+    override fun onEnabled(context: Context) {
+        instanceFlag = true
+    }
+
+    override fun onDisabled(context: Context) {
+        // Called when the last instance is removed.
+        instanceFlag = false
+        coverCache.evictAll()
     }
 
     private fun Bitmap.withRoundedCorners(radiusPx: Float): Bitmap {
@@ -195,12 +227,50 @@ class MusicWidgetProvider : AppWidgetProvider() {
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
-        /** Broadcast to every widget instance; safe to call when none exist. */
+        /** 8 × 256 px ARGB = 2 MB; a launcher shows one instance, sometimes two. */
+        private const val COVER_CACHE_BYTES = 2 * 1024 * 1024
+
+        /** Low 7 bits of the cache key; the album id owns the rest. */
+        private const val RADIUS_BUCKETS = 128
+
+        private val coverCache = object : LruCache<Long, Bitmap>(COVER_CACHE_BYTES) {
+            override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
+        }
+
+        private fun coverKey(albumId: Long, radiusPx: Float): Long =
+            albumId * RADIUS_BUCKETS + radiusPx.toInt().coerceIn(0, RADIUS_BUCKETS - 1)
+
+        /**
+         * Whether a launcher holds an instance.
+         *
+         * `null` means "not determined yet": the provider lifecycle seeds it
+         * (`onEnabled` / `onDisabled`) and the first call after a process start falls
+         * back to a single `getAppWidgetIds` query.
+         */
+        @Volatile
+        private var instanceFlag: Boolean? = null
+
+        /**
+         * Broadcast to every widget instance, or nothing when none exists.
+         *
+         * This used to fire on every track change, waking the receiver (`goAsync()`
+         * plus a coroutine scope) even with zero widgets on any home screen.
+         */
         fun refresh(context: Context) {
+            if (!hasInstances(context)) return
             val intent = Intent(context, MusicWidgetProvider::class.java)
                 .setAction(ACTION_REFRESH)
                 .setPackage(context.packageName)
             context.sendBroadcast(intent)
+        }
+
+        private fun hasInstances(context: Context): Boolean {
+            instanceFlag?.let { return it }
+            val present = AppWidgetManager.getInstance(context)
+                .getAppWidgetIds(ComponentName(context, MusicWidgetProvider::class.java))
+                .isNotEmpty()
+            instanceFlag = present
+            return present
         }
     }
 }

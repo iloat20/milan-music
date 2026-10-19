@@ -1,5 +1,6 @@
 package com.milan.music.play
 
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -48,10 +49,11 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
     /**
      * The notification re-resolves artwork on every metadata refresh, and switching
      * between tracks of one album repeats the same decode. Bitmaps are counted by
-     * byte size, not entry count, so a handful of large covers cannot exhaust it.
+     * their real allocation, not by `w * h * 4`: `loadThumbnail` may return a
+     * HARDWARE bitmap whose footprint that formula does not describe.
      */
     private val cache = object : LruCache<Uri, Bitmap>(CACHE_BYTES) {
-        override fun sizeOf(key: Uri, value: Bitmap): Int = value.byteCount
+        override fun sizeOf(key: Uri, value: Bitmap): Int = value.allocationByteCount
     }
 
     override fun supportsMimeType(mimeType: String): Boolean = mimeType.startsWith("image/")
@@ -59,7 +61,10 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
     override fun decodeBitmap(data: ByteArray): ListenableFuture<Bitmap> =
         executor.submit(
             Callable {
-                BitmapFactory.decodeByteArray(data, 0, data.size)
+                // Same bounds pass as the API 26-28 path: MediaItems here carry an
+                // artwork *URI*, never inline data, so this is only a safety net —
+                // and it must not be the one place that allocates a full-size cover.
+                decodeScaled(data)
                     ?: throw IOException("Unsupported artwork data (${data.size} bytes)")
             },
         )
@@ -80,11 +85,32 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
         executor.shutdown()
     }
 
+    /**
+     * Shrinks the notification-artwork cache under memory pressure.
+     *
+     * The media session caches the resolved bitmap for the current item itself, and
+     * anything evicted here is one local decode away from coming back, so trimming
+     * never costs playback — it only stops a few 512 px covers from being pinned in
+     * a backgrounded process.
+     *
+     * `RUNNING_LOW` is deprecated on API 34+ (never sent any more) and kept only for
+     * API 26-33, where the service can be trimmed while still in the foreground.
+     */
+    @Suppress("DEPRECATION")
+    fun onTrimMemory(level: Int) {
+        when {
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ->
+                cache.trimToSize(cache.maxSize() / 4)
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ->
+                cache.trimToSize(cache.maxSize() / 8)
+        }
+    }
+
     private fun resolve(uri: Uri): Bitmap? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             context.contentResolver.loadThumbnail(uri, Size(THUMB_SIZE, THUMB_SIZE), null)
         } else {
-            embeddedPicture(uri)?.let(::scaleDown)
+            embeddedPicture(uri)
         }
     }.getOrNull()
 
@@ -93,10 +119,37 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
         return try {
             retriever.setDataSource(context, uri)
             val bytes = retriever.embeddedPicture ?: return null
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            decodeScaled(bytes)
         } finally {
             runCatching { retriever.release() }
         }
+    }
+
+    /**
+     * Decodes embedded art straight to (roughly) [THUMB_SIZE] instead of native size.
+     *
+     * `decodeByteArray` without `inSampleSize` allocates the whole picture first: a
+     * 3000×3000 cover is 36 MB for an instant, which on a 2 GB device is enough for
+     * the low-memory killer to take the process before any catch clause runs. The
+     * bounds pass costs one header read and caps the allocation at ~4 MB; [scaleDown]
+     * then trims the remainder to an exact 512 px.
+     */
+    private fun decodeScaled(bytes: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val longest = max(bounds.outWidth, bounds.outHeight)
+        if (longest <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(longest)
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let(::scaleDown)
+    }
+
+    /** Largest power-of-two divisor that keeps the longest edge at or above [THUMB_SIZE]. */
+    private fun sampleSizeFor(longest: Int): Int {
+        var sample = 1
+        while (longest / (sample * 2) >= THUMB_SIZE) sample *= 2
+        return sample
     }
 
     private fun scaleDown(bitmap: Bitmap): Bitmap {

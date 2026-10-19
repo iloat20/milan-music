@@ -108,7 +108,12 @@ app/src/main/java/com/milan/music/
 | `2026-10-19-batch-f-tech-refresh.md` | 音频卸载启用、小组件圆角跨版本修复，及其实测待验证清单 |
 | `2026-10-19-batch-g-梯队二.md` | 预测式返回落地；音效链与共享元素过渡的待决策项 |
 | `2026-10-19-batch-h-genai-prompt-评估.md` | ML Kit GenAI Prompt API 可行性评估：三条否决项与"仅作查询解析器"的备选形态 |
+| `2026-10-19-memory-power-audit.md` | 内存与功耗专项审查（M1–M8 / P1–P8），含 Haze 2.0.1 API 反编译与平台 trim 档位核对 |
+| `2026-10-19-batch-i-memory-power.md` | 批次 I 执行记录：位图缓存回收出口、进度轮询订阅门控、内嵌封面两趟解码、release 日志剥离 |
+| `2026-10-19-batch-j-memory-power-ii.md` | 批次 II 执行记录：MediaStore 扫描水位线、小组件封面缓存与广播门控、位图真实记账；附 offload 与 float 输出关系的源码取证 |
+| `2026-10-19-m2-haze-performance-mode.md` | M2：`LocalHazePerformanceMode = Performance`；更正审计里模糊采样层的三处数字（1.57→0.63 MB 而非 7 MB），并说明 P2 为何是产品决策 |
 | `2026-10-19-release-1.0.46.md` | 1.0.46 发布说明：offload / 小组件圆角 / 预测式返回三项合并发布 |
+| `2026-10-19-release-1.0.47.md` | 1.0.47 发布说明：内存与功耗专项十项合并发布（缓存回收出口、轮询门控、扫描水位线、Haze 降采样），含 dex/mapping 取证 |
 | `2026-10-19-release-1.0.45.md` | 1.0.45 发布说明：搜索框空态文案移除与图标调整 |
 | `2026-10-19-code-review-1.0.44.md` | 1.0.44 合并前代码审查 |
 | `2026-10-19-release-1.0.44.md` | 1.0.44 发布说明与产品取舍 |

@@ -8,6 +8,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import dev.chrisbanes.haze.HazePerformanceMode
+import dev.chrisbanes.haze.LocalHazePerformanceMode
 
 private val LightColors = lightColorScheme(
     primary = Amber,
@@ -96,7 +98,25 @@ fun MilanTheme(
         )
     }
 
-    CompositionLocalProvider(LocalGlassColors provides glass) {
+    // Blur input is downsampled for every glass surface at once.
+    //
+    // Haze captures each effect's backdrop into an offscreen layer sized
+    // `effectBounds * resolveBlurInputScale(performanceMode)`, then applies the blur
+    // at that resolution. The library default is `Balanced` = `Fixed(0.5f)`, which
+    // resolves to 0.79 linear / 62.5% of the pixels (BlurInputScalePolicy.kt:
+    // sqrt(0.25 + 0.75 * qualityFraction)); `Performance` is the 0.5 linear / 25%
+    // floor and saves ~0.9 MB across the four panels.
+    //
+    // The apparent blur radius is unchanged: Haze scales the radius by the same
+    // factor (BlurVisualEffectUtils.kt `resolveBlurRadiusPx = blurRadius * scale`),
+    // so only pre-blur detail is lost — and 26.dp of blur destroys that detail
+    // anyway. The one visible consequence would be the 0.03 noise grain doubling in
+    // size, since noise is applied before the upscale; if it ever shows, step back
+    // to `Fixed(0.35f)` before giving up the saving entirely.
+    CompositionLocalProvider(
+        LocalGlassColors provides glass,
+        LocalHazePerformanceMode provides HazePerformanceMode.Performance,
+    ) {
         MaterialTheme(
             colorScheme = if (darkTheme) DarkColors else LightColors,
             typography = MilanTypography,

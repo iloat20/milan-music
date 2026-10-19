@@ -1,6 +1,7 @@
 package com.milan.music.ui.player
 
 import android.app.Activity
+import android.graphics.Bitmap
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -464,7 +465,14 @@ fun PlayerScreen(
 
 /** Most frequent saturated-ish colour, ignoring near-black and near-white pixels. */
 private fun dominantColorOf(image: ImageBitmap): Color {
-    val bitmap = image.asAndroidBitmap()
+    val source = image.asAndroidBitmap()
+    // getPixels() throws on a HARDWARE bitmap, and `loadThumbnail` may return one.
+    // The copy only happens on that path, and the backdrop is 96 px.
+    val bitmap = if (source.config == Bitmap.Config.HARDWARE) {
+        source.copy(Bitmap.Config.ARGB_8888, false) ?: return FallbackTint
+    } else {
+        source
+    }
     val histogram = IntArray(16 * 16 * 16)
 
     val stepX = max(1, bitmap.width / 32)

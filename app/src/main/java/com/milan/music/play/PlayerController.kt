@@ -58,6 +58,16 @@ class PlayerController(
     private var connection: ListenableFuture<MediaController>? = null
     private var progressJob: Job? = null
     private var queue: List<Track> = emptyList()
+
+    /**
+     * `mediaId` → [Track], rebuilt whenever the queue is replaced.
+     *
+     * `refresh()` runs on every Media3 event (several per second while playing) and
+     * used to resolve the current track with a linear scan plus a `toString()`
+     * allocation per candidate. The map is built once per queue instead, so the hot
+     * path is one hash lookup.
+     */
+    private val queueById = HashMap<String, Track>()
     private var pendingAction: (() -> Unit)? = null
     private var lastWidgetSnapshot: Pair<Long?, Boolean>? = null
 
@@ -76,6 +86,34 @@ class PlayerController(
 
     private val _progress = MutableStateFlow(PlaybackProgress())
     val progress: StateFlow<PlaybackProgress> = _progress.asStateFlow()
+
+    /**
+     * Whether anything is currently collecting [progress].
+     *
+     * Gating the ticker on `isPlaying` alone was the wrong dimension: the player
+     * sheet is the only consumer and it is only composed while open
+     * ([com.milan.music.ui.MilanApp]), yet the loop kept waking the main thread twice
+     * a second while the screen was off — 7 200 wake-ups an hour at a 500 ms
+     * interval, which is enough to keep the CPU out of the deep C-states. The
+     * lifecycle-aware collection in `PlayerScreen` makes `subscriptionCount` drop to
+     * zero on screen-off and on sheet-close, so both gates now match reality.
+     */
+    private var progressObserved = false
+
+    init {
+        // Main.immediate: the first emission (0 collectors) settles before the
+        // constructor returns, so no ticker can start before this gate is known.
+        scope.launch {
+            _progress.subscriptionCount.collect { count ->
+                progressObserved = count > 0
+                if (progressObserved && controller?.isPlaying == true) {
+                    startProgressLoop()
+                } else {
+                    stopProgressLoop()
+                }
+            }
+        }
+    }
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -152,6 +190,7 @@ class PlayerController(
         connection?.let { MediaController.releaseFuture(it) }
         connection = null
         queue = emptyList()
+        queueById.clear()
         // A later reconnect must be able to push a widget update even when the first
         // snapshot matches the last one before the release.
         lastWidgetSnapshot = null
@@ -191,6 +230,8 @@ class PlayerController(
         }
         val index = startIndex.coerceIn(0, tracks.lastIndex)
         queue = tracks
+        queueById.clear()
+        tracks.forEach { queueById[it.id.toString()] = it }
         val items = tracks.map { it.toMediaItem() }
         mediaController.setMediaItems(items, index, 0L)
         // Playback always starts in shuffle mode; the user can still turn it off
@@ -259,7 +300,7 @@ class PlayerController(
         // correct lookup is by mediaId; the index fallback fires only before any
         // media item has been set.
         val currentTrack = mediaItem?.mediaId
-            ?.let { id -> queue.firstOrNull { it.id.toString() == id } }
+            ?.let(queueById::get)
             ?: queue.getOrNull(mediaController.currentMediaItemIndex)
         Log.d(
             TAG,
@@ -312,6 +353,9 @@ class PlayerController(
      * playing and cancelled on pause, so an idle player costs nothing.
      */
     private fun startProgressLoop() {
+        // Both gates have to hold: playback advancing *and* somebody reading the
+        // value. See [progressObserved].
+        if (!progressObserved) return
         if (progressJob?.isActive == true) return
         progressJob = scope.launch {
             while (isActive) {
