@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">米兰音乐</string>
+    <string name="widget_description">2×2 播放器卡片，显示封面与当前歌曲</string>
+    <string name="widget_play_pause">播放或暂停</string>
+</resources>

@@ -1,0 +1,13 @@
+# 统一换行，避免 gradlew 在 Linux/macOS 检出后因 CRLF 报 bad interpreter
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源不做换行转换
+*.png binary
+*.jpg binary
+*.jks binary
+*.keystore binary
+*.jar binary

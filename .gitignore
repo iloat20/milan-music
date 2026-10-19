@@ -1,0 +1,27 @@
+# --- 构建产物 ---
+build/
+app/build/
+.gradle/
+.kotlin/
+captures/
+*.iml
+local.properties
+.gradle-cache/
+
+# --- 签名与凭据（绝不入库）---
+*.jks
+*.keystore
+*.p12
+keystore.properties
+signing.properties
+
+# --- 发布二进制（体积大，走 GitHub Releases 而非 git）---
+dist/*.apk
+dist/*.aab
+dist/*.idsig
+
+# --- IDE / 系统 ---
+.idea/
+.DS_Store
+Thumbs.db
+*.log
