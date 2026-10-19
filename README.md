@@ -106,6 +106,7 @@ app/src/main/java/com/milan/music/
 |---|---|
 | `2026-10-18-app-review.md` | 首次全量审查（P0–P3 共 60+ 项） |
 | `2026-10-19-batch-a-fixes.md` ~ `batch-e-lint-zero.md` | 五批修复与 lint 清零的执行记录 |
+| `2026-10-19-release-1.0.45.md` | 1.0.45 发布说明：搜索框空态文案移除与图标调整 |
 | `2026-10-19-code-review-1.0.44.md` | 1.0.44 合并前代码审查 |
 | `2026-10-19-release-1.0.44.md` | 1.0.44 发布说明与产品取舍 |
 

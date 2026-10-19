@@ -357,11 +357,11 @@ private fun SearchField(
         ) {
             Icon(
                 imageVector = Icons.Rounded.Search,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
-                modifier = Modifier.size(17.dp),
+                contentDescription = "搜索",
+                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.62f),
+                modifier = Modifier.size(21.dp),
             )
-            Spacer(Modifier.width(9.dp))
+            Spacer(Modifier.width(10.dp))
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
@@ -371,18 +371,6 @@ private fun SearchField(
                     color = MaterialTheme.colorScheme.onBackground,
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                decorationBox = { innerTextField ->
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (value.isEmpty()) {
-                            Text(
-                                text = "搜索歌曲、艺人、专辑",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
             )
             if (value.isNotEmpty()) {
                 IconButton(
