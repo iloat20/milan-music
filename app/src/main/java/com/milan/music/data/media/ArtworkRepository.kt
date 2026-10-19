@@ -4,9 +4,9 @@ import android.content.ComponentCallbacks2
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
-import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.ui.graphics.ImageBitmap
@@ -43,24 +43,48 @@ import kotlin.math.max
 class ArtworkRepository(private val context: Context) {
 
     /**
+     * Total bitmap budget, shared with the notification loader. See [BitmapBudget]
+     * for why it is derived from the heap rather than hard-coded.
+     *
+     * Slices below sum to 16/16: list 10, player 2, backdrop 1, notification 3.
+     */
+    private val budget = BitmapBudget.totalBytes(context)
+
+    /**
      * List thumbnails, keyed by albumId.
      *
      * Stored as [Bitmap] rather than [ImageBitmap] so `sizeOf` can report
      * `allocationByteCount`: MediaProvider is free to answer `loadThumbnail` with a
      * HARDWARE bitmap, whose real footprint bears no relation to `w * h * 4`.
      */
-    private val cache = object : LruCache<Long, Bitmap>(CACHE_BYTES) {
+    private val cache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 10, 16)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
-    /** Trimmed player-screen artwork, keyed by albumId. Few albums are viewed at once. */
-    private val playerCache = object : LruCache<Long, Bitmap>(PLAYER_CACHE_BYTES) {
+    /**
+     * Trimmed player-screen artwork, keyed by albumId. Few albums are viewed at
+     * once, so this earns the smallest slice that still spans a track change.
+     */
+    private val playerCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 2, 16)) {
+        override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
+    }
+
+    /**
+     * 96 px player backdrops, keyed by albumId.
+     *
+     * The player re-runs its backdrop effect whenever it is opened or the track
+     * changes, and without a cache each pass paid a `ContentResolver` round trip plus
+     * a decode for an image that had not changed. One album's backdrop is ~36 KB, so
+     * this slice holds dozens.
+     */
+    private val backdropCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 1, 16)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
     /** De-duplicates concurrent requests for the same album while scrolling fast. */
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
     private val pendingPlayer = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
+    private val pendingBackdrop = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
 
     suspend fun load(track: Track): ImageBitmap? {
         cache.get(track.albumId)?.let { return it.asImageBitmap() }
@@ -109,13 +133,30 @@ class ArtworkRepository(private val context: Context) {
     }
 
     /**
-     * Small, uncached decode used as the player backdrop.
+     * Small thumbnail used as the player backdrop, cached per album.
      *
      * A 96 px thumbnail scaled to full screen is inherently soft, so the player can
      * skip the expensive real-time `Modifier.blur` over a full-resolution bitmap.
+     * Cached because re-entering the player re-runs the effect for the current track
+     * even when nothing changed; the dominant-colour scan still repeats, but the
+     * ContentResolver round trip and the decode no longer do.
      */
-    suspend fun loadBackdrop(track: Track): ImageBitmap? = withContext(Dispatchers.IO) {
-        decodeBitmap(track, BACKDROP_SIZE)?.asImageBitmap()
+    suspend fun loadBackdrop(track: Track): ImageBitmap? {
+        backdropCache.get(track.albumId)?.let { return it.asImageBitmap() }
+
+        val own = CompletableDeferred<ImageBitmap?>()
+        pendingBackdrop.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
+
+        var result: ImageBitmap? = null
+        try {
+            val decoded = withContext(Dispatchers.IO) { decodeBitmap(track, BACKDROP_SIZE) }
+            if (decoded != null) backdropCache.put(track.albumId, decoded)
+            result = decoded?.asImageBitmap()
+            return result
+        } finally {
+            pendingBackdrop.remove(track.albumId)
+            own.complete(result)
+        }
     }
 
     fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
@@ -145,12 +186,30 @@ class ArtworkRepository(private val context: Context) {
             level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> {
                 cache.trimToSize(cache.maxSize() / 6)
                 playerCache.evictAll()
+                backdropCache.evictAll()
             }
             // RUNNING_LOW / RUNNING_CRITICAL (API 26-33): still foreground, but the
-            // process is under pressure. Shrink both, never empty them.
+            // process is under pressure. Shrink hard, never empty them.
+            //
+            // This test has to come before the RUNNING_MODERATE one below: the
+            // constants are 10 vs 5 and both branches use `>=`, so a wider `>= 5`
+            // placed first would swallow every RUNNING_LOW and RUNNING_CRITICAL
+            // event and silently cap the response at the gentler tier.
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
                 cache.trimToSize(cache.maxSize() / 8)
                 playerCache.trimToSize(playerCache.maxSize() / 8)
+                backdropCache.trimToSize(backdropCache.maxSize() / 8)
+            }
+            // RUNNING_MODERATE: the system is starting to run low while we are still
+            // in the foreground. Halving is a cheap first response and costs no
+            // visible cover: `trimToSize` evicts least-recently-used first, so the
+            // rows on screen and the player cover — by definition the most recently
+            // used entries — survive. Only covers the user scrolls back to may need
+            // re-decoding.
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> {
+                cache.trimToSize(cache.maxSize() / 2)
+                playerCache.trimToSize(playerCache.maxSize() / 2)
+                backdropCache.trimToSize(backdropCache.maxSize() / 2)
             }
         }
     }
@@ -159,23 +218,74 @@ class ArtworkRepository(private val context: Context) {
     fun evictAll() {
         cache.evictAll()
         playerCache.evictAll()
+        backdropCache.evictAll()
     }
 
     private fun decodeBitmap(track: Track, size: Int): Bitmap? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             context.contentResolver.loadThumbnail(track.uri, Size(size, size), null)
         } else {
-            @Suppress("DEPRECATION")
-            MediaStore.Images.Media.getBitmap(context.contentResolver, albumArtUri(track.albumId))
-                ?.let { bitmap ->
-                    if (bitmap.width > size) {
-                        bitmap.scale(size, size)
-                    } else {
-                        bitmap
-                    }
-                }
+            decodeAlbumArt(albumArtUri(track.albumId), size)
         }
     }.getOrNull()
+
+    /**
+     * API 26-28 album art: bounds pass, then sample, then trim to [size].
+     *
+     * `MediaStore.Images.Media.getBitmap` (the previous implementation) opened the
+     * stream and decoded at native size, scaling afterwards — a 1200 px album-art
+     * row allocated 5.5 MB to produce a 192 px thumbnail. Reading the stream twice,
+     * once for the header and once for the pixels, caps the peak at the sampled
+     * size instead. The two calls are otherwise identical: `getBitmap` was itself
+     * `openInputStream` + `decodeStream`.
+     *
+     * Sampling alone cannot land on an exact size because `inSampleSize` is a
+     * power-of-two divisor: a 1200 px source sampled by 4 still returns 300 px, and
+     * a 480 px source must not be sampled at all. The final [scale] closes that
+     * remainder and preserves the aspect ratio — the previous square `scale(size,
+     * size)` stretched any cover that was not 1:1.
+     */
+    private fun decodeAlbumArt(uri: Uri, size: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, bounds)
+        } ?: return null
+
+        val longest = max(bounds.outWidth, bounds.outHeight)
+        if (longest <= 0) return null
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(longest, size)
+        }
+        val sampled = context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
+        } ?: return null
+
+        val sampledLongest = max(sampled.width, sampled.height)
+        if (sampledLongest <= size) return sampled
+        val ratio = size.toFloat() / sampledLongest
+        return sampled.scale(
+            (sampled.width * ratio).toInt().coerceAtLeast(1),
+            (sampled.height * ratio).toInt().coerceAtLeast(1),
+        )
+    }
+
+    /**
+     * Largest power-of-two divisor that keeps the longest edge at or above [target].
+     *
+     * Mirrors `ArtworkBitmapLoader.sampleSizeFor`, kept local rather than shared:
+     * the two call sites differ in where the target comes from (a constant there, a
+     * parameter here) and six lines do not justify a common module.
+     */
+    private fun sampleSizeFor(longest: Int, target: Int): Int {
+        // A non-positive target keeps the loop condition true forever and overflows
+        // the divisor into a divide-by-zero. Every caller passes a positive constant,
+        // so this clamp is defensive only.
+        val floor = target.coerceAtLeast(1)
+        var sample = 1
+        while (longest / (sample * 2) >= floor) sample *= 2
+        return sample
+    }
 
     /**
      * Crops rows/columns that are uniformly near-white.
@@ -267,8 +377,6 @@ class ArtworkRepository(private val context: Context) {
         /** The player renders the cover full-width, so it keeps the larger source. */
         private const val PLAYER_THUMB_SIZE = 512
         private const val BACKDROP_SIZE = 96
-        private const val CACHE_BYTES = 24 * 1024 * 1024
-        private const val PLAYER_CACHE_BYTES = 6 * 1024 * 1024
         private const val LIGHT_THRESHOLD = 236
         private const val MAX_TRIM_FRACTION = 0.22f
         private const val MIN_KEEP_FRACTION = 0.45f

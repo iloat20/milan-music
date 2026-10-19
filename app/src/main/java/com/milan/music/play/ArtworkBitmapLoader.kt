@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.ListeningExecutorService
 import com.google.common.util.concurrent.MoreExecutors
+import com.milan.music.data.media.BitmapBudget
 import java.io.IOException
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -40,6 +41,9 @@ import kotlin.math.max
 @OptIn(UnstableApi::class)
 class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
 
+    /** Heap-derived total; this loader owns the notification's slice of it. */
+    private val budget = BitmapBudget.totalBytes(context)
+
     private val executor: ListeningExecutorService = MoreExecutors.listeningDecorator(
         Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "milan-artwork").apply { isDaemon = true }
@@ -51,8 +55,12 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
      * between tracks of one album repeats the same decode. Bitmaps are counted by
      * their real allocation, not by `w * h * 4`: `loadThumbnail` may return a
      * HARDWARE bitmap whose footprint that formula does not describe.
+     *
+     * Sized from the same heap-derived budget as the in-app caches (3/16 of the
+     * total): 512 px covers are 1 MB each, so a fixed 8 MB ceiling held eight of them
+     * regardless of whether the device could afford it.
      */
-    private val cache = object : LruCache<Uri, Bitmap>(CACHE_BYTES) {
+    private val cache = object : LruCache<Uri, Bitmap>(BitmapBudget.slice(budget, 3, 16)) {
         override fun sizeOf(key: Uri, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -165,6 +173,5 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
     private companion object {
         /** Notification and lock-screen artwork is shown at most ~512 px wide. */
         const val THUMB_SIZE = 512
-        const val CACHE_BYTES = 8 * 1024 * 1024
     }
 }

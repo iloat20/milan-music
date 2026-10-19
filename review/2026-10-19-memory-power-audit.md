@@ -292,6 +292,7 @@ private fun startProgressLoop() {
 | 强制 `RGB_565` 解封面 | 省一半内存，但渐变与暗部出现色带，与水墨金箔的视觉要求冲突 |
 | `System.gc()` / 手动 `recycle()` | Compose 仍持有 `ImageBitmap` 引用，手动回收会踩 use-after-free；交给 `onTrimMemory` 与 LRU |
 | 引入 Coil / Glide | 本项目已有 albumId 键的去重 + 双档尺寸缓存，换库只增加体积 |
+| 后台把输出采样率 48k 降到 44.1k | 三者皆不成立：Media3 无此 API（`DefaultAudioSink.Builder` 无采样率设定项）；解码成本与输出采样率无关；样本数只少 8.1%，理论整机收益 0.5–0.8%，还要付一次自建 SRC。详见 `2026-10-19-background-sample-rate-eval.md` |
 
 ---
 

@@ -11,12 +11,12 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
 import android.graphics.RectF
 import android.util.LruCache
 import android.widget.RemoteViews
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.core.graphics.createBitmap
-import androidx.core.graphics.scale
 import com.milan.music.MainActivity
 import com.milan.music.MilanMusicApp
 import com.milan.music.R
@@ -153,7 +153,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
      *
      * The result is cached per (albumId, corner radius): a refresh previously
      * allocated twice — `scale()` and then a second full bitmap inside
-     * [withRoundedCorners] — for artwork that only changes when the track does. The
+     * [roundedCover] — for artwork that only changes when the track does. The
      * radius is part of the key because it derives from the launcher's cell width,
      * which differs between instances.
      */
@@ -166,8 +166,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
         coverCache.get(key)?.let { return it }
         val app = context.applicationContext as? MilanMusicApp ?: return null
         val bitmap = app.container.artwork.load(track)?.asAndroidBitmap() ?: return null
-        return bitmap.scale(COVER_SIZE, COVER_SIZE)
-            .withRoundedCorners(radiusPx)
+        return roundedCover(bitmap, COVER_SIZE, radiusPx)
             .also { coverCache.put(key, it) }
     }
 
@@ -181,21 +180,36 @@ class MusicWidgetProvider : AppWidgetProvider() {
         coverCache.evictAll()
     }
 
-    private fun Bitmap.withRoundedCorners(radiusPx: Float): Bitmap {
-        if (radiusPx <= 0f) return this
-        val output = createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    /**
+     * Scales [source] to a [size] square and clips it to rounded corners in one
+     * allocation.
+     *
+     * The previous chain was `scale()` followed by a second full bitmap for the
+     * round-rect mask — two 256 KB allocations per track change to produce one.
+     * Drawing the source straight into the rounded output with a scaling paint
+     * removes the intermediate bitmap and the GC pressure that came with it.
+     */
+    private fun roundedCover(source: Bitmap, size: Int, radiusPx: Float): Bitmap {
+        val output = createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawRoundRect(
-            RectF(0f, 0f, width.toFloat(), height.toFloat()),
-            radiusPx,
-            radiusPx,
+        if (radiusPx > 0f) {
+            canvas.drawRoundRect(
+                RectF(0f, 0f, size.toFloat(), size.toFloat()),
+                radiusPx,
+                radiusPx,
+                paint,
+            )
+            // SRC_IN keeps pixels inside the rounded rect and clears the rest, so the
+            // corners end up transparent instead of a hard-coded colour.
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        }
+        canvas.drawBitmap(
+            source,
+            Rect(0, 0, source.width, source.height),
+            Rect(0, 0, size, size),
             paint,
         )
-        // SRC_IN keeps pixels inside the rounded rect and clears the rest, so the
-        // corners end up transparent instead of a hard-coded colour.
-        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
-        canvas.drawBitmap(this, 0f, 0f, paint)
         return output
     }
 

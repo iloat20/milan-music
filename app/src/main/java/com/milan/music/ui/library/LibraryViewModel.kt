@@ -1,11 +1,11 @@
 package com.milan.music.ui.library
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.milan.music.data.media.IndexFingerprint
 import com.milan.music.data.media.LibraryCacheStore
 import com.milan.music.data.media.MediaStoreRepository
 import com.milan.music.data.model.SortMode
@@ -144,26 +144,39 @@ class LibraryViewModel(
      *
      * The reconciliation used to run on every cold start, so the cache only saved the
      * first frame, not the scan: a 5k-track library paid 200-800 ms of cursor work on
-     * each launch even when nothing had been added. The fingerprint comparison makes
-     * the common case (nothing changed) cost one aggregate query.
+     * each launch even when nothing had been added. Comparing the provider's
+     * generation counter makes the common case (nothing changed) cost one binder
+     * call.
      */
     fun ensureLoaded() {
         if (cacheLoaded) return
         cacheLoaded = true
         viewModelScope.launch {
             val cached = libraryCache.load()
+            // Taken once, before any row is read, then reused for the write below.
+            //
+            // Two reasons the *pre-read* value is the correct one to store. First
+            // cost: a second `stamp()` after the scan is another binder call, and on
+            // API 26-29 it degrades to a full-table aggregate, so the old code paid
+            // the most expensive query twice. Second, and the actual bug: a stamp
+            // taken after the read labels the snapshot with an index state it may
+            // not contain. If a track were added while the cursor walked, the stored
+            // generation would already include it while `fresh` does not, so the
+            // next launch would match and skip — the new track invisible until a
+            // manual refresh. Storing the earlier stamp makes that launch rescan
+            // instead, which heals in one pass.
+            val stamp = mediaStore.stamp()
             if (cached.isNotEmpty()) {
                 allTracks.value = cached
                 loading.value = false
 
-                // Deleting a file moves the row count; adding or re-tagging one moves
-                // the newest DATE_MODIFIED. A snapshot can therefore only look
-                // unchanged when nothing the user would notice has changed.
-                val watermark = IndexFingerprint(
-                    count = cached.size.toLong(),
-                    newestModified = cached.maxOf { it.dateModified },
-                )
-                if (mediaStore.fingerprint() == watermark) return@launch
+                // The stamp is written in the same commit as the rows, so a match
+                // means the snapshot still describes what the provider has indexed.
+                val stored = libraryCache.loadStamp()
+                if (stamp.sameAs(stored)) {
+                    Log.i(TAG, "library unchanged (${stored?.describe()}), rescan skipped")
+                    return@launch
+                }
             }
 
             val fresh = mediaStore.loadTracks()
@@ -181,11 +194,11 @@ class LibraryViewModel(
             if (cachedIds != freshIds) {
                 allTracks.value = fresh
             }
-            // Saved even when the ids match: the payload also carries the watermark,
-            // and this is what lets the next launch skip the scan. A cache written
-            // before `dateModified` existed has 0 for every row, so it fails the
-            // comparison exactly once and heals here.
-            libraryCache.save(fresh)
+            // Saved even when the ids match: the payload also carries the stamp, and
+            // this is what lets the next launch skip the scan. A cache written before
+            // the stamp existed has none, so it fails the comparison exactly once and
+            // heals here.
+            libraryCache.save(fresh, stamp)
 
             loading.value = false
         }
@@ -198,9 +211,13 @@ class LibraryViewModel(
 
     private suspend fun scan() {
         loading.value = true
+        // Same ordering rule as [ensureLoaded]: stamp before the rows, so a change
+        // that lands mid-scan forces the next launch to rescan rather than going
+        // unnoticed.
+        val stamp = mediaStore.stamp()
         val tracks = mediaStore.loadTracks()
         allTracks.value = tracks
-        libraryCache.save(tracks)
+        libraryCache.save(tracks, stamp)
         loading.value = false
     }
 
@@ -218,6 +235,7 @@ class LibraryViewModel(
 
     companion object {
         private const val QUERY_DEBOUNCE_MS = 180L
+        private const val TAG = "LibraryViewModel"
 
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
             initializer {

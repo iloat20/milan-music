@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import com.milan.music.data.model.Track
 import kotlinx.coroutines.Dispatchers
@@ -82,19 +83,25 @@ class MediaStoreRepository(private val context: Context) {
     }
 
     /**
-     * Fingerprint of the audio index without reading a single track row.
+     * Watermark of the audio index, taken without reading a single track row.
      *
-     * [loadTracks] materialises ten columns per row and costs hundreds of
-     * milliseconds on a large library. "How many rows, and how new is the newest
-     * modification" answers the only question that matters on launch — whether the
-     * cached snapshot is still valid — and both aggregates are answered from the
-     * index. Deleting a file moves the count, adding or re-tagging one moves the
-     * watermark.
+     * On API 30+ this is [MediaStore.getGeneration]: MediaProvider bumps that
+     * counter on every insert, update and delete, so comparing two readings is a
+     * single binder call and covers re-tagging (which a row count would miss).
      *
-     * Returns null when the provider rejects the aggregate projection (some OEM
-     * ROMs do); the caller then falls back to a full scan, i.e. the old behaviour.
+     * Older releases used an aggregate projection — `COUNT(*)`, `MAX(DATE_MODIFIED)`.
+     * That is kept only as the API 26–29 path: the Android 17 MediaProvider rejects
+     * `COUNT(*) AS track_count` with `IllegalArgumentException: Invalid column`, and
+     * because the failure was swallowed the caller silently fell back to a full
+     * rescan on every launch. Aggregates over MediaStore are not portable, so they
+     * are never used where a supported alternative exists.
+     *
+     * Never throws: an empty stamp simply means "unknown", which the caller treats
+     * as "changed" and answers with a full scan.
      */
-    suspend fun fingerprint(): IndexFingerprint? = withContext(Dispatchers.IO) {
+    suspend fun stamp(): IndexStamp = withContext(Dispatchers.IO) {
+        generationOrNull()?.let { return@withContext IndexStamp(generation = it) }
+
         runCatching {
             val columns = arrayOf(
                 "COUNT(*) AS track_count",
@@ -104,13 +111,32 @@ class MediaStoreRepository(private val context: Context) {
                 if (!cursor.moveToFirst()) {
                     null
                 } else {
-                    IndexFingerprint(
+                    IndexStamp(
                         count = cursor.getLong(0),
                         newestModified = if (cursor.isNull(1)) 0L else cursor.getLong(1),
                     )
                 }
             }
-        }.getOrNull()
+        }.getOrNull() ?: IndexStamp()
+    }
+
+    /**
+     * Generation counter of the shared media volume, or null when the platform does
+     * not expose one (API < 30) or the provider refuses the volume name.
+     *
+     * [MediaStore.VOLUME_EXTERNAL] spans every mounted volume and matches the
+     * collection queried above, but not every provider implements it; the primary
+     * volume is the fallback. The order is fixed so that repeated reads hit the same
+     * counter — mixing the two would compare unrelated sequences.
+     */
+    private fun generationOrNull(): Long? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        for (volume in VOLUME_CANDIDATES) {
+            runCatching { MediaStore.getGeneration(context, volume) }
+                .getOrNull()
+                ?.let { return it }
+        }
+        return null
     }
 
     private fun Cursor.stringAt(index: Int): String =
@@ -124,14 +150,46 @@ class MediaStoreRepository(private val context: Context) {
 
     companion object {
         private const val MIN_DURATION_MS = 60_000L
+
+        private val VOLUME_CANDIDATES = listOf(
+            MediaStore.VOLUME_EXTERNAL,
+            MediaStore.VOLUME_EXTERNAL_PRIMARY,
+        )
     }
 }
 
 /**
- * Identity of a MediaStore snapshot: how many tracks match the selection, and the
- * newest `DATE_MODIFIED` among them.
+ * Identity of a MediaStore snapshot.
+ *
+ * Either [generation] is set (API 30+, authoritative) or the legacy pair is
+ * ([count] + [newestModified]); a default-constructed stamp means "unknown" and
+ * never matches anything.
  */
-data class IndexFingerprint(
-    val count: Long,
-    val newestModified: Long,
-)
+data class IndexStamp(
+    val generation: Long? = null,
+    val count: Long = -1L,
+    val newestModified: Long = -1L,
+) {
+
+    /**
+     * Whether [other] describes the same index state as this stamp.
+     *
+     * Stamps taken from different sources are never comparable: a cached stamp
+     * written before this field existed, or read on a device where the generation
+     * counter is unavailable, forces one rescan and then heals.
+     */
+    fun sameAs(other: IndexStamp?): Boolean {
+        if (other == null) return false
+        if (generation != null || other.generation != null) {
+            return generation != null && generation == other.generation
+        }
+        return count >= 0 && count == other.count && newestModified == other.newestModified
+    }
+
+    fun describe(): String = if (generation != null) {
+        "generation=$generation"
+    } else {
+        "count=$count newest=$newestModified"
+    }
+}
+

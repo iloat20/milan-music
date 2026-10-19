@@ -26,7 +26,7 @@ Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻�
 | 层 | 选型 |
 |---|---|
 | UI | Jetpack Compose（BOM 2026.09.00）、Material 3 |
-| 播放 | Media3 1.11.1（ExoPlayer + MediaSession，音频硬解卸载 + gapless） |
+| 播放 | Media3 1.11.1（ExoPlayer + MediaSession，音频卸载**关闭**；优先 Android 17 进程内软解，gapless 由 PCM 路径按 encoder delay/padding 裁剪） |
 | 模糊 / 玻璃 | Haze 2.0.1 |
 | 持久化 | DataStore Preferences + kotlinx.serialization |
 | 音乐库 | MediaStore 查询 + 磁盘缓存 |
@@ -112,6 +112,26 @@ app/src/main/java/com/milan/music/
 | `2026-10-19-batch-i-memory-power.md` | 批次 I 执行记录：位图缓存回收出口、进度轮询订阅门控、内嵌封面两趟解码、release 日志剥离 |
 | `2026-10-19-batch-j-memory-power-ii.md` | 批次 II 执行记录：MediaStore 扫描水位线、小组件封面缓存与广播门控、位图真实记账；附 offload 与 float 输出关系的源码取证 |
 | `2026-10-19-m2-haze-performance-mode.md` | M2：`LocalHazePerformanceMode = Performance`；更正审计里模糊采样层的三处数字（1.57→0.63 MB 而非 7 MB），并说明 P2 为何是产品决策 |
+| `2026-10-19-inprocess-codec-eval.md` | Android 17 进程内音频解码器评估：技术成立，含 API 36/37 逐行 diff；"offload 命中时链路上没有解码器"的推论已被真机推翻（见该文档 §八勘误） |
+| `2026-10-19-inprocess-codec-introduce.md` | 引入 D1 解码器偏好：三层排序（硬件 → inproc → 其余软件）而非草案的无条件前移；埋点发现 `onOffloadedPlayback` 在 media3 1.11.1 是死方法 |
+| `2026-10-19-android17-transport-loudness-eval.md` | 传输与响度评估：LHDC v5 在应用层无观测面（API 37 无常量、codecType 已废弃）；CTA-2075 的 `LoudnessCodecController` 实为 API 35 引入且只对带响度元数据的码流生效；xHE-AAC/IAMF 的版本归属与 extractor 缺口核对 |
+| `2026-10-19-usb-dac-bitperfect-eval.md` | USB DAC 直通评估：`MIXER_BEHAVIOR_BIT_PERFECT` 可用但仅限 USB + `USAGE_MEDIA`，与当前 float 输出冲突；libusb 直通被官方文档列为问题来源；DSD 需自写 extractor |
+| `2026-10-19-lossy-restoration-eval.md` | 有损修复评估：谐波重建是合成非恢复、立体声细节在信息论上不可逆；实时 DSP 必须关 offload（拿确定的功耗换主观听感），建议只做频谱截止检测 |
+| `2026-10-19-oboe-latency-eval.md` | Oboe / AAudio 评估：API 27 门槛与 OpenSL 回退属实，但实时线程里不能解码；44.1k 源与低延迟路径互斥；本地播放没有输入端，结论是不做 |
+| `2026-10-19-offload-keep-or-disable.md` | offload 收益与门槛全解：省解码功耗、绕 mixer、sink 休眠；`isGaplessSupportRequired(true)` 在 API 29–32 上使命中率恒为 0（media3 字节码取证）。原结论"保留 offload"，已由该文档 §九 决策反转（关闭） |
+| `2026-10-19-preload-and-offload-eval.md` | 预加载与卸载核实：offload 送的是压缩帧不是 PCM（`audio/raw` 被显式排除）；`PreloadMediaSource` 场景错配，首播延迟大头在本项目的 `bufferForPlaybackMs=250` |
+| `2026-10-19-scan-metadata-io-eval.md` | 扫描与封面核实：MediaStore 本就有 `samplerate`/`bits_per_sample` 两列（无需 jaudiotagger，且项目无 Room/Room 表）；RGB_565 的收益是命中率翻倍而非峰值下降，因为 LRU 上限按字节写死 |
+| `2026-10-19-device-verification.md` | 真机验收（OPPO Android 17）：冷启 207–228 ms / D1 选中 inproc AAC（17 ms）；P3 水位线被 MediaProvider 拒绝 `COUNT(*)` 而静默失效；offload 因设备只报 BITSTREAM(4) 而永不命中，与 gapless 无关 |
+| `2026-10-19-bg-audio-and-pipeline-eval.md` | 进程内解码间接收益 + Android 17 后台音频加固核实：media3 无 AAudio/Oboe 通路（103 类中 0 处）、解码不在回调线程；后台音频两档要求本项目已满足；CDD 30 ms 属音频编码器且自 Android 13 起存在 |
+| `2026-10-19-p3-generation-stamp-fix.md` | P3 修复：聚合投影换成 `MediaStore.getGeneration()`（返回 long，跨重启稳定），聚合仅留作 API 26–29 兜底；tracks 与印章同事务写入；增删双向真机验证 |
+| `2026-10-19-artwork-sampling-fix.md` | 封面三条建议核实：API 29+ 的 `loadThumbnail` 已跨进程直接产出目标尺寸；DiskLruCache 让位于 provider 内建的缩略图磁盘缓存；弱引用不采纳。补掉 API 26–28 的 `getBitmap()` 全尺寸解码缺口 |
+| `2026-10-19-decode-buffer-pool.md` | 解码缓冲池化核实：codec 缓冲由 `MediaCodec` 管、预读缓冲已有 `DefaultAllocator` 池，真正可动的只有 `trimOnReset`；`getNativeHeapAllocatedSize` 漏 mmap/ashmem，口径应为 `MemoryInfo.nativePss` |
+| `2026-10-19-library-scan-io-eval.md` | 扫描 IO 核实：1 读 + 1 写已是理论下限（MediaProvider 已在系统侧解完标签，无需 jaudiotagger）；查出 `stamp()` 重复调用与「扫描期间新增歌曲被永久跳过」的时序缺陷 |
+| `2026-10-19-lifecycle-release-and-trim-eval.md` | 释放链路核实：`player.release()` → `MediaCodecAudioRenderer.onDisabled()` 同时覆盖 codec 与 AudioTrack，应用层直接 release 会踩已释放句柄；`onTrimMemory` 缺 `RUNNING_MODERATE` 档，且分支必须按常量值降序 |
+| `2026-10-19-fgs-and-scheduling-eval.md` | 前台服务与调度核实：`mediaPlayback` 类型 + 权限齐备，Doze 不受影响，暂停后 10 分钟自动退出前台（`MediaNotificationManager` 字节码）；扫描挪 WorkManager 会让「加歌即见」退化为手动刷新 |
+| `2026-10-19-background-sample-rate-eval.md` | 后台降采样核实：`DefaultAudioSink.Builder` 无采样率 setter，`SonicAudioProcessor` 只有 speed/pitch；48k→44.1k 只少搬 8.1% 样本却要多付一次 SRC，理论上限 0.5–0.8% 且方向为负 |
+| `2026-10-19-hardware-decoder-priority-eval.md` | 硬件解码优先核实：`InProcessCodecSelector` 已保证硬件层整体在头；「硬解省 35%」属视频或 audio offload；AOSP 音频解码组件全为 C2Soft，`hardwareAccelerated` 分区在事实上可能为空 |
+| `2026-10-19-release-1.0.48.md` | 1.0.48 发布说明：索引水位线、解码器偏好、封面与缓冲内存专项九项合并发布，含 dex 探针与「压缩后体积连续五版相同」的取证 |
 | `2026-10-19-release-1.0.46.md` | 1.0.46 发布说明：offload / 小组件圆角 / 预测式返回三项合并发布 |
 | `2026-10-19-release-1.0.47.md` | 1.0.47 发布说明：内存与功耗专项十项合并发布（缓存回收出口、轮询门控、扫描水位线、Haze 降采样），含 dex/mapping 取证 |
 | `2026-10-19-release-1.0.45.md` | 1.0.45 发布说明：搜索框空态文案移除与图标调整 |

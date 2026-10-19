@@ -6,6 +6,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.milan.music.data.model.Track
@@ -77,26 +78,60 @@ private val Context.libraryCacheStore: DataStore<Preferences> by
 class LibraryCacheStore(private val context: Context) {
 
     private val tracksKey = stringPreferencesKey("tracks")
+    private val generationKey = longPreferencesKey("index_generation")
+    private val countKey = longPreferencesKey("index_count")
+    private val newestKey = longPreferencesKey("index_newest")
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = ListSerializer(CachedTrack.serializer())
 
     suspend fun load(): List<Track> = withContext(Dispatchers.Default) {
-        val preferences = context.libraryCacheStore.data
-            .catch { throwable ->
-                if (throwable is IOException) emit(emptyPreferences()) else throw throwable
-            }
-            .first()
-
-        val raw = preferences[tracksKey] ?: return@withContext emptyList()
+        val raw = preferences()[tracksKey] ?: return@withContext emptyList()
         runCatching { json.decodeFromString(serializer, raw) }
             .getOrDefault(emptyList())
             .map { it.toTrack() }
     }
 
-    suspend fun save(tracks: List<Track>) = withContext(Dispatchers.Default) {
+    /**
+     * Watermark stored alongside the snapshot, or null when the cache predates it.
+     *
+     * Null is not an error: it makes the first launch after an upgrade take the
+     * full-scan path once, which then rewrites the cache with a stamp.
+     */
+    suspend fun loadStamp(): IndexStamp? = withContext(Dispatchers.Default) {
+        val preferences = preferences()
+        if (!preferences.contains(generationKey) && !preferences.contains(countKey)) {
+            return@withContext null
+        }
+        IndexStamp(
+            generation = preferences[generationKey],
+            count = preferences[countKey] ?: -1L,
+            newestModified = preferences[newestKey] ?: -1L,
+        )
+    }
+
+    /**
+     * Writes the snapshot and the watermark in one commit so they can never
+     * disagree — a stale stamp next to fresh rows would make the next launch skip
+     * a scan it actually needed.
+     */
+    suspend fun save(tracks: List<Track>, stamp: IndexStamp) = withContext(Dispatchers.Default) {
         val payload = json.encodeToString(serializer, tracks.map { it.toCached() })
         context.libraryCacheStore.edit { preferences ->
             preferences[tracksKey] = payload
+            val generation = stamp.generation
+            if (generation != null) {
+                preferences[generationKey] = generation
+            } else {
+                preferences.remove(generationKey)
+            }
+            preferences[countKey] = stamp.count
+            preferences[newestKey] = stamp.newestModified
         }
     }
+
+    private suspend fun preferences(): Preferences = context.libraryCacheStore.data
+        .catch { throwable ->
+            if (throwable is IOException) emit(emptyPreferences()) else throw throwable
+        }
+        .first()
 }
