@@ -4,6 +4,8 @@ Android 本地音乐播放器。直接读取设备上的音频文件，**不联�
 
 Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻璃质感。
 
+**[下载最新版本](https://github.com/iloat20/milan-music/releases/latest)** · 签名的 APK 与 AAB 发布在 Releases，不随 git 仓库分发。
+
 <img src="screenshots/library.jpg" width="320" alt="曲库界面">
 
 ## 功能
