@@ -15,7 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -75,6 +75,7 @@ import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.MiniPlayer
 import com.milan.music.ui.glass.GlassSurface
 import com.milan.music.ui.theme.LocalGlassColors
+import com.milan.music.ui.util.noRippleCombinedClickable
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -480,7 +481,8 @@ private fun GlassBottomBar(
                 Column(
                     modifier = Modifier
                         .clip(RoundedCornerShape(18.dp))
-                        .combinedClickable(
+                        .noRippleCombinedClickable(
+                            role = Role.Tab,
                             onClick = { onSelect(index) },
                             onLongClick = if (index == 0) onRescan else null,
                         )

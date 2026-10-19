@@ -5,7 +5,6 @@ import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -52,22 +51,18 @@ data class PlaybackProgress(
 class PlayerController(
     private val context: Context,
     private val scope: CoroutineScope,
+    /**
+     * Shared with [PlaybackService]: the queue is handed to the session as bare
+     * `mediaId` + `uri` items, and the session rebuilds their metadata from here.
+     * See [PlaybackTrackIndex] for why.
+     */
+    private val trackIndex: PlaybackTrackIndex,
 ) {
 
     private var controller: MediaController? = null
     private var connection: ListenableFuture<MediaController>? = null
     private var progressJob: Job? = null
     private var queue: List<Track> = emptyList()
-
-    /**
-     * `mediaId` → [Track], rebuilt whenever the queue is replaced.
-     *
-     * `refresh()` runs on every Media3 event (several per second while playing) and
-     * used to resolve the current track with a linear scan plus a `toString()`
-     * allocation per candidate. The map is built once per queue instead, so the hot
-     * path is one hash lookup.
-     */
-    private val queueById = HashMap<String, Track>()
     private var pendingAction: (() -> Unit)? = null
     private var lastWidgetSnapshot: Pair<Long?, Boolean>? = null
 
@@ -95,8 +90,8 @@ class PlayerController(
      * ([com.milan.music.ui.MilanApp]), yet the loop kept waking the main thread twice
      * a second while the screen was off — 7 200 wake-ups an hour at a 500 ms
      * interval, which is enough to keep the CPU out of the deep C-states. The
-     * lifecycle-aware collection in `PlayerScreen` makes `subscriptionCount` drop to
-     * zero on screen-off and on sheet-close, so both gates now match reality.
+     * lifecycle-aware collection inside `AppleMusicProgress` makes `subscriptionCount`
+     * drop to zero on screen-off and on sheet-close, so both gates now match reality.
      */
     private var progressObserved = false
 
@@ -190,7 +185,9 @@ class PlayerController(
         connection?.let { MediaController.releaseFuture(it) }
         connection = null
         queue = emptyList()
-        queueById.clear()
+        // [trackIndex] is deliberately not cleared: with a queue still loaded in the
+        // session, the notification keeps resolving metadata for it. It is replaced
+        // wholesale by the next playQueue().
         // A later reconnect must be able to push a widget update even when the first
         // snapshot matches the last one before the release.
         lastWidgetSnapshot = null
@@ -230,8 +227,10 @@ class PlayerController(
         }
         val index = startIndex.coerceIn(0, tracks.lastIndex)
         queue = tracks
-        queueById.clear()
-        tracks.forEach { queueById[it.id.toString()] = it }
+        // Written before the queue reaches the session: onAddMediaItems resolves
+        // against this map, and setMediaItems is asynchronous, so a later write can
+        // race an earlier resolution.
+        trackIndex.replace(tracks)
         val items = tracks.map { it.toMediaItem() }
         mediaController.setMediaItems(items, index, 0L)
         // Playback always starts in shuffle mode; the user can still turn it off
@@ -300,7 +299,7 @@ class PlayerController(
         // correct lookup is by mediaId; the index fallback fires only before any
         // media item has been set.
         val currentTrack = mediaItem?.mediaId
-            ?.let(queueById::get)
+            ?.let(trackIndex::get)
             ?: queue.getOrNull(mediaController.currentMediaItemIndex)
         Log.d(
             TAG,
@@ -388,7 +387,17 @@ class PlayerController(
     }
 
     /**
-     * Artwork URI points at the audio item itself, not at the retired
+     * A queue entry carries identity and location only — no [MediaMetadata].
+     *
+     * The metadata (title, artist, album, artwork URI) is rebuilt by
+     * [PlaybackService]'s `MediaSession.Callback.onAddMediaItems` from
+     * [PlaybackTrackIndex]. Attaching it here instead meant every tap on a row built
+     * one `MediaMetadata` per track in the library — three strings and a `Uri` each —
+     * for every item except the handful the session actually displays. Those objects
+     * were then written into a Parcel and read back, so the cost was paid twice, on
+     * the main thread, before the first sample of the tapped track was requested.
+     *
+     * The artwork URI the session publishes is the audio item itself, not the retired
      * `content://media/external/audio/albumart/<id>` provider (deprecated in API 29
      * and unreliable above it). [ArtworkBitmapLoader] resolves it through
      * `ContentResolver.loadThumbnail`, which returns the embedded picture — the same
@@ -397,14 +406,6 @@ class PlayerController(
     private fun Track.toMediaItem(): MediaItem = MediaItem.Builder()
         .setMediaId(id.toString())
         .setUri(uri)
-        .setMediaMetadata(
-            MediaMetadata.Builder()
-                .setTitle(displayTitle)
-                .setArtist(displayArtist)
-                .setAlbumTitle(displayAlbum)
-                .setArtworkUri(uri)
-                .build(),
-        )
         .build()
 
     companion object {

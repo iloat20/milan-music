@@ -77,11 +77,13 @@ import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
 import com.milan.music.data.userdata.UserData
 import com.milan.music.di.AppContainer
+import com.milan.music.play.PlaybackProgress
 import com.milan.music.ui.components.CoverArt
 import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.util.formatDuration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -97,7 +99,6 @@ fun PlayerScreen(
     onBack: () -> Unit,
 ) {
     val playerState by container.player.state.collectAsStateWithLifecycle()
-    val progress by container.player.progress.collectAsStateWithLifecycle()
     val userData by container.userData.data
         .collectAsStateWithLifecycle(initialValue = UserData())
     val scope = rememberCoroutineScope()
@@ -445,9 +446,8 @@ fun PlayerScreen(
             Spacer(Modifier.height(14.dp))
 
             AppleMusicProgress(
-                positionMs = progress.positionMs,
-                durationMs = progress.durationMs.takeIf { it > 0L }
-                    ?: (track?.duration ?: 0L),
+                progress = container.player.progress,
+                fallbackDurationMs = track?.duration ?: 0L,
                 onSeek = container.player::seekTo,
             )
 
@@ -525,13 +525,28 @@ private fun blend(base: Color, target: Color, amount: Float): Color = Color(
 /**
  * Apple Music style progress: a hairline that thickens while dragging, no
  * permanent thumb, tap anywhere to seek.
+ *
+ * This is the only composable that collects [progress]. Reading the flow in
+ * [PlayerScreen] made every 500 ms tick recompose the whole sheet — cover,
+ * backdrop, title and controls included — even though only the bar and the two
+ * time labels change. Collecting in the smallest scope keeps that invalidation
+ * local.
+ *
+ * `derivedStateOf` is deliberately not used as a throttle: it only suppresses
+ * recomposition when the *derived value* is equal. A progress bar's ratio changes
+ * on every tick, so a derived ratio would still change; moving the read down is
+ * what actually prevents the parent from recomposing.
  */
 @Composable
 private fun AppleMusicProgress(
-    positionMs: Long,
-    durationMs: Long,
+    progress: StateFlow<PlaybackProgress>,
+    fallbackDurationMs: Long,
     onSeek: (Long) -> Unit,
 ) {
+    val playbackProgress by progress.collectAsStateWithLifecycle()
+    val positionMs = playbackProgress.positionMs
+    val durationMs = playbackProgress.durationMs.takeIf { it > 0L } ?: fallbackDurationMs
+
     var dragging by remember { mutableStateOf(false) }
     var dragRatio by remember { mutableFloatStateOf(0f) }
 

@@ -13,6 +13,13 @@ import android.content.Context
  * proportional both ways: a 512 MB heap is not served by the same 38 MB, and older
  * hardware should not be asked for it.
  *
+ * The ceiling started at 48 MB and is now 32 MB, and the list slice went from 10/16
+ * to 8/16 of the total. Concretely, a 192 MB heap (24 MB total, below the cap) gives
+ * the list 12 MB instead of 15 MB, and a 512 MB heap that used to sit at the 48 MB cap
+ * now stops at 32 MB. The list slice is the only consumer that grows with scroll depth,
+ * and 12 MB still spans ~80 albums at 192 px — more scroll-back than a session
+ * performs. See [com.milan.music.data.media.ArtworkRepository] for the slice split.
+ *
  * `getMemoryClass()` reports the per-process heap limit, so no `largeHeap` is needed
  * and none is requested — the manifest stays default.
  */
@@ -26,11 +33,15 @@ internal object BitmapBudget {
 
     /**
      * The floor keeps the caches useful on tiny heaps (96 MB would otherwise yield
-     * 12 MB); the ceiling exists because a screenful of covers is bounded by the
-     * display, not by the heap, so headroom past ~50 MB buys nothing.
+     * 12 MB). The ceiling is derived from what covers on screen can consume, not from
+     * what the heap would allow: at 192 px a list thumbnail is ~147 KB, so even the
+     * reduced 8/16 list slice holds ~80 albums at a 192 MB heap — several screens of
+     * scroll-back. Raising the cap past 32 MB only raises the resident footprint; it
+     * does not save a single decode, because no user scrolls back further than the
+     * cache already reaches.
      */
     private const val MIN_BYTES = 16 * 1024 * 1024
-    private const val MAX_BYTES = 48 * 1024 * 1024
+    private const val MAX_BYTES = 32 * 1024 * 1024
 
     /** Whole-app bitmap budget: list + player + backdrop + notification artwork. */
     fun totalBytes(context: Context): Int {

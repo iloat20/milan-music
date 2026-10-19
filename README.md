@@ -131,6 +131,8 @@ app/src/main/java/com/milan/music/
 | `2026-10-19-fgs-and-scheduling-eval.md` | 前台服务与调度核实：`mediaPlayback` 类型 + 权限齐备，Doze 不受影响，暂停后 10 分钟自动退出前台（`MediaNotificationManager` 字节码）；扫描挪 WorkManager 会让「加歌即见」退化为手动刷新 |
 | `2026-10-19-background-sample-rate-eval.md` | 后台降采样核实：`DefaultAudioSink.Builder` 无采样率 setter，`SonicAudioProcessor` 只有 speed/pitch；48k→44.1k 只少搬 8.1% 样本却要多付一次 SRC，理论上限 0.5–0.8% 且方向为负 |
 | `2026-10-19-hardware-decoder-priority-eval.md` | 硬件解码优先核实：`InProcessCodecSelector` 已保证硬件层整体在头；「硬解省 35%」属视频或 audio offload；AOSP 音频解码组件全为 C2Soft，`hardwareAccelerated` 分区在事实上可能为空 |
+| `2026-10-20-release-1.0.50.md` | 1.0.50 发布说明：队列元数据按需解析、4 MB 缓冲字节上限、封面预算收缩与播放页进度重组下沉 |
+| `2026-10-19-release-1.0.49.md` | 1.0.49 发布说明：3 条阻断 + 3 条高优先修复，release 收敛为 arm64-v8a 单 ABI |
 | `2026-10-19-release-1.0.48.md` | 1.0.48 发布说明：索引水位线、解码器偏好、封面与缓冲内存专项九项合并发布，含 dex 探针与「压缩后体积连续五版相同」的取证 |
 | `2026-10-19-release-1.0.46.md` | 1.0.46 发布说明：offload / 小组件圆角 / 预测式返回三项合并发布 |
 | `2026-10-19-release-1.0.47.md` | 1.0.47 发布说明：内存与功耗专项十项合并发布（缓存回收出口、轮询门控、扫描水位线、Haze 降采样），含 dex/mapping 取证 |

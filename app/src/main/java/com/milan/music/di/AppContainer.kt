@@ -6,6 +6,7 @@ import com.milan.music.data.media.LibraryCacheStore
 import com.milan.music.data.media.MediaStoreRepository
 import com.milan.music.data.prefs.SettingsStore
 import com.milan.music.data.userdata.UserDataStore
+import com.milan.music.play.PlaybackTrackIndex
 import com.milan.music.play.PlayerController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,5 +27,12 @@ class AppContainer(context: Context) {
     val artwork = ArtworkRepository(appContext)
     val userData = UserDataStore(appContext)
     val settings = SettingsStore(appContext)
-    val player = PlayerController(appContext, scope)
+
+    /**
+     * Built before [player] and handed to both sides of the session: the controller
+     * writes it when a queue is set, [com.milan.music.play.PlaybackService] reads it
+     * to resolve `MediaItem` metadata on demand.
+     */
+    val trackIndex = PlaybackTrackIndex()
+    val player = PlayerController(appContext, scope, trackIndex)
 }

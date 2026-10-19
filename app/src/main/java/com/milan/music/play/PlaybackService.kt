@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -15,6 +17,10 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.milan.music.MilanMusicApp
+import com.milan.music.data.model.Track
 
 /**
  * Hosts the ExoPlayer instance in a foreground service so playback survives
@@ -39,6 +45,75 @@ class PlaybackService : MediaSessionService() {
      * service dies; see [releaseBufferPool].
      */
     private var bufferAllocator: DefaultAllocator? = null
+
+    /**
+     * Queue metadata, resolved on demand instead of shipped with every item.
+     *
+     * [PlayerController.playQueue] hands the session bare `mediaId` + `uri` items.
+     * Attaching a `MediaMetadata` to all of them meant building one per track in the
+     * library — three strings and a `Uri` each — for every item the session never
+     * displays, on the thread the user tapped on, and then writing it into a Parcel.
+     * Only the current and the preloaded item are ever read back.
+     *
+     * `onSetMediaItems` is deliberately not overridden: media3's default implementation
+     * resolves through this method, so one override covers `setMediaItems` and
+     * `addMediaItems` alike.
+     *
+     * A miss returns the item unchanged instead of failing: the queue and the index
+     * are written together in `playQueue`, but a session restored by the platform
+     * after process death can legitimately hold items the index no longer knows. The
+     * player then plays them without title/artist rather than rejecting the whole
+     * `setMediaItems` call.
+     */
+    private val sessionCallback = object : MediaSession.Callback {
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> {
+            // One lookup per item, counted while resolving rather than re-probing
+            // `mediaMetadata` afterwards: a MediaItem always carries a (possibly
+            // empty) metadata object, so null-checking it proves nothing.
+            var hits = 0
+            val resolved = mediaItems.map { item ->
+                val track = trackIndex?.get(item.mediaId)
+                if (track == null) {
+                    item
+                } else {
+                    hits++
+                    item.withMetadata(track)
+                }
+            }
+            // The counter is the only evidence that the index lookup works. A miss is
+            // otherwise invisible: the items still play, they just show no title,
+            // artist or artwork in the notification and lock screen. `resolved=0/N` is
+            // the signature of a broken same-process assumption (see PlaybackTrackIndex).
+            Log.i(TAG, "queue metadata resolved $hits/${mediaItems.size}")
+            return Futures.immediateFuture(resolved)
+        }
+    }
+
+    /**
+     * The shared `mediaId` → [Track] map, read from the application container.
+     *
+     * Resolved through a safe cast rather than a hard cast: a service created with a
+     * plain [android.app.Application] must still start and play, just without queue
+     * metadata.
+     */
+    private val trackIndex: PlaybackTrackIndex?
+        get() = (application as? MilanMusicApp)?.container?.trackIndex
+
+    /** Rebuilds one queue item's metadata from the index entry the controller wrote. */
+    private fun MediaItem.withMetadata(track: Track): MediaItem = buildUpon()
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(track.displayTitle)
+                .setArtist(track.displayArtist)
+                .setAlbumTitle(track.displayAlbum)
+                .setArtworkUri(track.uri)
+                .build(),
+        )
+        .build()
 
     override fun onCreate() {
         super.onCreate()
@@ -88,6 +163,25 @@ class PlaybackService : MediaSessionService() {
         )
         bufferAllocator = allocator
 
+        // Time-based buffering is unchanged; [ByteCappedLoadControl] layers a byte
+        // ceiling on top of it so a 30-second window cannot mean 17 MB on a 24-bit
+        // file. The floor is shared with the delegate on purpose: the cap is not
+        // allowed to shrink the buffer below it.
+        val loadControl = ByteCappedLoadControl(
+            delegate = DefaultLoadControl.Builder()
+                .setAllocator(allocator)
+                .setBufferDurationsMs(
+                    /* minBufferMs = */ MIN_BUFFER_MS,
+                    /* maxBufferMs = */ MAX_BUFFER_MS,
+                    /* bufferForPlaybackMs = */ 120,
+                    /* bufferForPlaybackAfterRebufferMs = */ 500,
+                )
+                .build(),
+            allocator = allocator,
+            byteCap = ByteCappedLoadControl.DEFAULT_BYTE_CAP,
+            minBufferUs = MIN_BUFFER_MS * 1_000L,
+        )
+
         val player = ExoPlayer.Builder(this)
             .setRenderersFactory(renderersFactory)
             // Default buffer targets streaming; local files can start almost
@@ -96,17 +190,7 @@ class PlaybackService : MediaSessionService() {
             // reading a local file costs a few ms and decoder init 10-50 ms, while
             // everything below this number is pure waiting before the first frame.
             // It costs no memory, only slack against a slow storage read.
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setAllocator(allocator)
-                    .setBufferDurationsMs(
-                        /* minBufferMs = */ 15_000,
-                        /* maxBufferMs = */ 30_000,
-                        /* bufferForPlaybackMs = */ 120,
-                        /* bufferForPlaybackAfterRebufferMs = */ 500,
-                    )
-                    .build(),
-            )
+            .setLoadControl(loadControl)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -195,6 +279,7 @@ class PlaybackService : MediaSessionService() {
 
         mediaSession = MediaSession.Builder(this, player)
             .setBitmapLoader(loader)
+            .setCallback(sessionCallback)
             .build()
     }
 
@@ -272,5 +357,18 @@ class PlaybackService : MediaSessionService() {
 
     private companion object {
         const val TAG = "PlaybackService"
+
+        /**
+         * Buffer floor, in both dimensions: the time form feeds the delegate, the
+         * microsecond form is what keeps the byte cap from starving the buffer.
+         */
+        const val MIN_BUFFER_MS = 15_000
+
+        /**
+         * Upper bound of the time-based window. The byte ceiling in
+         * [ByteCappedLoadControl] usually closes first on high-bitrate files; this
+         * stays as the bound for low-bitrate ones, where 30 s costs almost nothing.
+         */
+        const val MAX_BUFFER_MS = 30_000
     }
 }

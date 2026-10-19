@@ -47,7 +47,10 @@ class ArtworkRepository(private val context: Context) {
      * Total bitmap budget, shared with the notification loader. See [BitmapBudget]
      * for why it is derived from the heap rather than hard-coded.
      *
-     * Slices below sum to 16/16: list 10, player 2, backdrop 1, notification 3.
+     * Slices below sum to 14/16: list 8, player 2, backdrop 1, notification 3. The
+     * remaining 2/16 is deliberate headroom: decoding a cover holds the source and
+     * the scaled result at the same time, and that transient allocation lives outside
+     * every cache, so it must not be counted against them.
      */
     private val budget = BitmapBudget.totalBytes(context)
 
@@ -57,8 +60,13 @@ class ArtworkRepository(private val context: Context) {
      * Stored as [Bitmap] rather than [ImageBitmap] so `sizeOf` can report
      * `allocationByteCount`: MediaProvider is free to answer `loadThumbnail` with a
      * HARDWARE bitmap, whose real footprint bears no relation to `w * h * 4`.
+     *
+     * The 8/16 slice is 12 MB at a 192 MB heap — about 80 albums at 147 KB each, i.e.
+     * several screens of scroll-back. It was 10/16; that extra 3 MB never bought a
+     * decode that this one misses on any realistic scroll, and it was resident for as
+     * long as the process lived.
      */
-    private val cache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 10, 16)) {
+    private val cache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 8, 16)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -166,7 +174,7 @@ class ArtworkRepository(private val context: Context) {
      * Releases cached covers when the process is told to shed memory.
      *
      * [LruCache] only evicts on `put()`, so without this hook the list cache sits
-     * pinned at its 24 MB ceiling for as long as the process lives — including while
+     * pinned at its slice ceiling for as long as the process lives — including while
      * the app is in the background, where the only artwork on screen is the mini
      * player's and the notification's. Trimming on `UI_HIDDEN` is the cheapest large
      * win available here: the covers rebuild from MediaProvider (local, no network)
