@@ -1,7 +1,7 @@
 package com.milan.music.ui.player
 
 import android.app.Activity
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
@@ -79,6 +79,7 @@ import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.CoverArt
 import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.util.formatDuration
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -239,13 +240,35 @@ fun PlayerScreen(
         // System back mirrors the swipe-down dismiss so the user can never be
         // stranded on a screen whose only exit is a gesture.
         //
+        // Predictive back (API 34+) feeds the same `offsetY` the touch gesture
+        // drives, so the sheet follows the system's back preview instead of
+        // jumping. The guard is on the progress value itself, not on the SDK
+        // level: platforms that do not preview the gesture report a single 1.0
+        // event, and snapping to that would make the player vanish in one frame
+        // instead of running the 240 ms slide-out.
+        //
         // The handler stays registered for the whole dismissal: `enabled` is
-        // deliberately *not* tied to `isSettling`. Disabling it while the sheet
+        // deliberately *not* tied to `isSettling`. Removing it while the sheet
         // slides out would let a second back press (typical double-press interval
         // is 150-250 ms, same order as the 240 ms animation) fall through to the
         // activity's default handler and finish the app. The re-entry guard
         // belongs inside the callback instead.
-        BackHandler { if (!isSettling.value) dismissToHome() }
+        PredictiveBackHandler { progress ->
+            if (isSettling.value) return@PredictiveBackHandler
+            try {
+                progress.collect { event ->
+                    val isIntermediate = event.progress > 0f && event.progress < 1f
+                    if (isIntermediate) {
+                        offsetY.snapTo(event.progress * sheetHeightPx.floatValue)
+                    }
+                }
+            } catch (cancellation: CancellationException) {
+                // The gesture was released before committing: put the sheet back.
+                offsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                throw cancellation
+            }
+            dismissToHome()
+        }
 
         // Square cover sized to the width, but capped so it never collides with the
         // controls on short screens.

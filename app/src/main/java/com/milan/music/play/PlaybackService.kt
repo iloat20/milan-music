@@ -6,6 +6,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -30,6 +31,10 @@ class PlaybackService : MediaSessionService() {
         // Float output keeps 24-bit sources at full precision instead of truncating
         // to 16-bit integers. Devices that cannot take float PCM fall back on their
         // own; this only removes the artificial ceiling.
+        //
+        // Offload is *not* configured here: since Media3 1.11 the renderers factory
+        // no longer owns that switch, it is driven entirely by the player's
+        // TrackSelectionParameters below (the old setEnableAudioOffload() is gone).
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableAudioFloatOutput(true)
 
@@ -59,6 +64,27 @@ class PlaybackService : MediaSessionService() {
             // decoder thread once the device dozes.
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setHandleAudioBecomingNoisy(true)
+            .build()
+
+        // Audio offload moves decoding and rendering to the DSP, so the CPU only
+        // has to feed the buffer instead of decoding every frame — the largest power
+        // win available to a local player. Note the ceiling: the builder above sets
+        // WAKE_MODE_LOCAL, which still holds a partial wake lock, so the CPU is not
+        // allowed to deep-sleep; the saving comes from dropping decode work, not
+        // from idling the core. Two further constraints:
+        //   * gapless has to be a hard requirement, otherwise the hardware flushes
+        //     its buffer with a silence frame between tracks of a continuous album;
+        //   * offload bypasses ExoPlayer's audio post-processing, so any future
+        //     equalizer or speed control must switch the mode to DISABLED while it
+        //     is active (volume changes are unaffected: they go through AudioTrack).
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setAudioOffloadPreferences(
+                AudioOffloadPreferences.Builder()
+                    .setAudioOffloadMode(AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED)
+                    .setIsGaplessSupportRequired(true)
+                    .build(),
+            )
             .build()
 
         // Playback errors used to be silent: ExoPlayer stopped and the UI just

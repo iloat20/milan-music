@@ -6,8 +6,15 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
 import android.widget.RemoteViews
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import com.milan.music.MainActivity
 import com.milan.music.MilanMusicApp
@@ -100,7 +107,14 @@ class MusicWidgetProvider : AppWidgetProvider() {
         if (track != null) {
             val bitmap = app.container.artwork.load(track)?.asAndroidBitmap()
             if (bitmap != null) {
-                views.setImageViewBitmap(R.id.widget_cover, bitmap.scale(COVER_SIZE, COVER_SIZE))
+                // Corners are rounded here, in the app process, because on API 26-30
+                // `clipToOutline` is a no-op in RemoteViews and the only reflective
+                // fix (setClipToOutline) is not on the launcher's method whitelist —
+                // calling it fails the whole update. Pre-clipping the bitmap keeps
+                // the shape identical on every supported version.
+                val cover = bitmap.scale(COVER_SIZE, COVER_SIZE)
+                    .withRoundedCorners(cardCornerRadiusPx(manager, widgetId))
+                views.setImageViewBitmap(R.id.widget_cover, cover)
             }
             views.setTextViewText(R.id.widget_title, track.displayTitle)
         } else {
@@ -116,6 +130,41 @@ class MusicWidgetProvider : AppWidgetProvider() {
         views.setOnClickPendingIntent(R.id.widget_play, toggleIntent(context))
 
         manager.updateAppWidget(widgetId, views)
+    }
+
+    /**
+     * Corner radius of the card, expressed in the cover bitmap's own pixel space.
+     *
+     * The cover fills the card, so the visual radius maps to `radiusDp / widthDp` of
+     * the bitmap width. Reading the real width from the widget options keeps the
+     * shape correct on launchers whose 2x2 cell is wider than the declared 110dp
+     * minimum; when the launcher reports nothing usable, the declared minimum is
+     * assumed.
+     */
+    private fun cardCornerRadiusPx(manager: AppWidgetManager, widgetId: Int): Float {
+        val widthDp = manager.getAppWidgetOptions(widgetId)
+            .getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 0)
+        val referenceWidthDp = (widthDp.takeIf { it > 0 } ?: FALLBACK_CARD_WIDTH_DP).toFloat()
+        return (CARD_RADIUS_DP / referenceWidthDp * COVER_SIZE)
+            .coerceIn(0f, COVER_SIZE / 2f)
+    }
+
+    private fun Bitmap.withRoundedCorners(radiusPx: Float): Bitmap {
+        if (radiusPx <= 0f) return this
+        val output = createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawRoundRect(
+            RectF(0f, 0f, width.toFloat(), height.toFloat()),
+            radiusPx,
+            radiusPx,
+            paint,
+        )
+        // SRC_IN keeps pixels inside the rounded rect and clears the rest, so the
+        // corners end up transparent instead of a hard-coded colour.
+        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        canvas.drawBitmap(this, 0f, 0f, paint)
+        return output
     }
 
     private fun openAppIntent(context: Context): PendingIntent {
@@ -134,6 +183,13 @@ class MusicWidgetProvider : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.milan.music.widget.REFRESH"
 
         private const val COVER_SIZE = 256
+
+        /** Must match the `corners` radius in `drawable/widget_card_bg.xml`. */
+        private const val CARD_RADIUS_DP = 26f
+
+        /** Must match `android:minWidth` in `xml/music_widget_info.xml`. */
+        private const val FALLBACK_CARD_WIDTH_DP = 110
+
         private const val REQUEST_OPEN = 100
         private const val REQUEST_TOGGLE = 101
         private const val PENDING_FLAGS =

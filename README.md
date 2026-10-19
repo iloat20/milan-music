@@ -18,7 +18,7 @@ Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻�
 | 歌单 | 自建歌单 |
 | 播放页 | 全屏覆盖层，下滑手势或返回键关闭；进度拖拽、上一首 / 下一首、播放暂停 |
 | 后台播放 | Media3 `MediaSessionService`，通知栏 / 锁屏 / 蓝牙控制，封面同步 |
-| 桌面小组件 | 2×2 卡片，显示封面与曲名，可直接播放暂停 |
+| 桌面小组件 | 2×2 卡片，显示封面与曲名，可直接播放暂停；封面圆角在 Android 8–11 上同样生效 |
 | 主题图标 | Android 13+ 自适应图标的 monochrome 层 |
 
 ## 技术栈
@@ -26,7 +26,7 @@ Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻�
 | 层 | 选型 |
 |---|---|
 | UI | Jetpack Compose（BOM 2026.09.00）、Material 3 |
-| 播放 | Media3 1.11.1（ExoPlayer + MediaSession） |
+| 播放 | Media3 1.11.1（ExoPlayer + MediaSession，音频硬解卸载 + gapless） |
 | 模糊 / 玻璃 | Haze 2.0.1 |
 | 持久化 | DataStore Preferences + kotlinx.serialization |
 | 音乐库 | MediaStore 查询 + 磁盘缓存 |
@@ -93,7 +93,6 @@ app/src/main/java/com/milan/music/
 
 ## 已知问题
 
-- **Android 8–11 小组件圆角失效**：`RemoteViews` 的 `setClipToOutline` 需反射且方法名不在远程白名单内，调用会让整个挂件加载失败，暂未实现。
 - **暂停态从最近任务划掉卡片后服务仍存活**：有队列时主动保留绑定以便重开续播，属产品取舍。
 - **Compose 内约 20 处中文硬编码**：暂无多语言计划。
 - **无自动化测试**：`src/test` 与 `src/androidTest` 均为空。行为验证目前依赖真机冒烟。
@@ -106,6 +105,10 @@ app/src/main/java/com/milan/music/
 |---|---|
 | `2026-10-18-app-review.md` | 首次全量审查（P0–P3 共 60+ 项） |
 | `2026-10-19-batch-a-fixes.md` ~ `batch-e-lint-zero.md` | 五批修复与 lint 清零的执行记录 |
+| `2026-10-19-batch-f-tech-refresh.md` | 音频卸载启用、小组件圆角跨版本修复，及其实测待验证清单 |
+| `2026-10-19-batch-g-梯队二.md` | 预测式返回落地；音效链与共享元素过渡的待决策项 |
+| `2026-10-19-batch-h-genai-prompt-评估.md` | ML Kit GenAI Prompt API 可行性评估：三条否决项与"仅作查询解析器"的备选形态 |
+| `2026-10-19-release-1.0.46.md` | 1.0.46 发布说明：offload / 小组件圆角 / 预测式返回三项合并发布 |
 | `2026-10-19-release-1.0.45.md` | 1.0.45 发布说明：搜索框空态文案移除与图标调整 |
 | `2026-10-19-code-review-1.0.44.md` | 1.0.44 合并前代码审查 |
 | `2026-10-19-release-1.0.44.md` | 1.0.44 发布说明与产品取舍 |
