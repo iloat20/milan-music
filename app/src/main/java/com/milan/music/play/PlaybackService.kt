@@ -54,8 +54,15 @@ class PlaybackService : MediaSessionService() {
         // Offload is *not* configured here: since Media3 1.11 the renderers factory
         // no longer owns that switch and the old setEnableAudioOffload() is gone — the
         // mode lives in the player's TrackSelectionParameters, left at its default.
+        // Decoder fallback is off by default in media3, and with it off
+        // MediaCodecRenderer only ever attempts `decoderInfos.get(0)`. Combined with a
+        // selector that reorders the platform list, that turns a *preference* into the
+        // only candidate: one `configure()` failure on the promoted in-process decoder
+        // ends in ExoPlaybackException with no retry, where the stock ordering would
+        // have walked on to the next decoder. Turning it on restores that walk.
         val renderersFactory = DefaultRenderersFactory(this)
             .setMediaCodecSelector(InProcessCodecSelector)
+            .setEnableDecoderFallback(true)
             .setEnableAudioFloatOutput(true)
 
         // Sample buffers are pooled inside DefaultAllocator, but the instance that
@@ -221,9 +228,20 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    /** True while the queue is loaded and either playing or about to play. */
+    /**
+     * True while the queue is loaded and playback is actually going or about to start.
+     *
+     * `playWhenReady` alone is not enough: it stays `true` after the queue runs out
+     * (`STATE_ENDED`), and it also stays `true` when the user pauses and the player
+     * falls back to `STATE_READY`. The first case is the common one — an album ends
+     * with the app backgrounded — and it is exactly when the pool is worth
+     * releasing: nothing is decoding, and a restart re-selects tracks and restores the
+     * target size anyway.
+     */
     private fun isPlaybackActive(): Boolean {
         val player = mediaSession?.player ?: return false
+        val state = player.playbackState
+        if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) return false
         return player.playWhenReady || player.isPlaying
     }
 

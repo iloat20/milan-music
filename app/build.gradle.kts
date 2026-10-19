@@ -24,8 +24,8 @@ android {
         applicationId = "com.milan.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 49
-        versionName = "1.0.48"
+        versionCode = 50
+        versionName = "1.0.49"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -53,6 +53,19 @@ android {
                 "proguard-rules.pro"
             )
             signingConfig = signingConfigs.getByName("release")
+
+            // arm64-v8a only. The app has no native code of its own: the two .so files
+            // in the package come from androidx (graphics-path, datastore shared counter)
+            // and ship per ABI. Filtering to 64-bit ARM drops the 32-bit and x86 copies —
+            // ~50 KB — and makes the shipped artifact's ABI set explicit instead of
+            // inherited from whichever transitive dependency added a native lib next.
+            //
+            // Scoped to release on purpose: `debug` keeps all four ABIs so x86_64
+            // emulators still install. The trade-off is real — release no longer installs
+            // on 32-bit-only devices, which is acceptable above minSdk 26 in 2026.
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
         }
         debug {
             applicationIdSuffix = ".debug"

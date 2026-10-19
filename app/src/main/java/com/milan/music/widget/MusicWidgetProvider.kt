@@ -13,6 +13,7 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
+import android.util.Log
 import android.util.LruCache
 import android.widget.RemoteViews
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -46,7 +47,12 @@ class MusicWidgetProvider : AppWidgetProvider() {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 appWidgetIds.forEach { widgetId ->
-                    render(context, appWidgetManager, widgetId)
+                    // Per-instance isolation: a failure here escapes into a
+                    // SupervisorJob coroutine with no handler, which takes the whole
+                    // process down — the user sees the launcher crash, not just a
+                    // blank widget. One misbehaving instance must not abort the rest.
+                    runCatching { render(context, appWidgetManager, widgetId) }
+                        .onFailure { Log.w(TAG, "render failed for widget $widgetId", it) }
                 }
             } finally {
                 pending.finish()
@@ -79,17 +85,19 @@ class MusicWidgetProvider : AppWidgetProvider() {
         val pending = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             try {
-                val app = context.applicationContext as? MilanMusicApp ?: return@launch
-                val player = app.container.player
+                runCatching {
+                    val app = context.applicationContext as? MilanMusicApp ?: return@runCatching
+                    val player = app.container.player
 
-                if (player.state.value.queueSize == 0) {
-                    val tracks = app.container.libraryCache.load()
-                    if (tracks.isNotEmpty()) {
-                        player.playQueue(tracks, Random.nextInt(tracks.size))
+                    if (player.state.value.queueSize == 0) {
+                        val tracks = app.container.libraryCache.load()
+                        if (tracks.isNotEmpty()) {
+                            player.playQueue(tracks, Random.nextInt(tracks.size))
+                        }
+                    } else {
+                        player.togglePlayPause()
                     }
-                } else {
-                    player.togglePlayPause()
-                }
+                }.onFailure { Log.w(TAG, "toggle failed", it) }
             } finally {
                 pending.finish()
             }
@@ -166,8 +174,10 @@ class MusicWidgetProvider : AppWidgetProvider() {
         coverCache.get(key)?.let { return it }
         val app = context.applicationContext as? MilanMusicApp ?: return null
         val bitmap = app.container.artwork.load(track)?.asAndroidBitmap() ?: return null
-        return roundedCover(bitmap, COVER_SIZE, radiusPx)
-            .also { coverCache.put(key, it) }
+        return runCatching { roundedCover(bitmap, COVER_SIZE, radiusPx) }
+            .onFailure { Log.w(TAG, "cover render failed for album ${track.albumId}", it) }
+            .getOrNull()
+            ?.also { coverCache.put(key, it) }
     }
 
     override fun onEnabled(context: Context) {
@@ -188,8 +198,21 @@ class MusicWidgetProvider : AppWidgetProvider() {
      * round-rect mask — two 256 KB allocations per track change to produce one.
      * Drawing the source straight into the rounded output with a scaling paint
      * removes the intermediate bitmap and the GC pressure that came with it.
+     *
+     * Returns null when the source cannot be drawn. On API 29+ the artwork comes from
+     * `ContentResolver.loadThumbnail`, which is free to hand back a
+     * `Bitmap.Config.HARDWARE` bitmap; `Canvas.drawBitmap` rejects those on a software
+     * canvas with `IllegalArgumentException: Software rendering doesn't support
+     * hardware bitmaps`. [ArtworkRepository] pays the same copy for its pixel scan, so
+     * the widget pays it too — and a null here means "show the placeholder", which is
+     * the same outcome as missing artwork.
      */
-    private fun roundedCover(source: Bitmap, size: Int, radiusPx: Float): Bitmap {
+    private fun roundedCover(source: Bitmap, size: Int, radiusPx: Float): Bitmap? {
+        val drawable = if (source.config == Bitmap.Config.HARDWARE) {
+            source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
+        } else {
+            source
+        }
         val output = createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -205,8 +228,8 @@ class MusicWidgetProvider : AppWidgetProvider() {
             paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
         }
         canvas.drawBitmap(
-            source,
-            Rect(0, 0, source.width, source.height),
+            drawable,
+            Rect(0, 0, drawable.width, drawable.height),
             Rect(0, 0, size, size),
             paint,
         )
@@ -227,6 +250,8 @@ class MusicWidgetProvider : AppWidgetProvider() {
     companion object {
         const val ACTION_TOGGLE = "com.milan.music.widget.TOGGLE"
         const val ACTION_REFRESH = "com.milan.music.widget.REFRESH"
+
+        private const val TAG = "MusicWidget"
 
         private const val COVER_SIZE = 256
 

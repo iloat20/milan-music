@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.ui.graphics.ImageBitmap
@@ -221,12 +222,21 @@ class ArtworkRepository(private val context: Context) {
         backdropCache.evictAll()
     }
 
+    /**
+     * Decoded artwork, or null when the provider cannot serve it.
+     *
+     * The failure is logged rather than swallowed: "no cover on this album" is
+     * indistinguishable from "the provider threw" at the UI level, and the previous
+     * silent `getOrNull()` made the difference unrecoverable after the fact.
+     */
     private fun decodeBitmap(track: Track, size: Int): Bitmap? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             context.contentResolver.loadThumbnail(track.uri, Size(size, size), null)
         } else {
             decodeAlbumArt(albumArtUri(track.albumId), size)
         }
+    }.onFailure {
+        Log.w(TAG, "artwork decode failed for album ${track.albumId} at ${size}px", it)
     }.getOrNull()
 
     /**
@@ -360,7 +370,12 @@ class ArtworkRepository(private val context: Context) {
      */
     private fun Bitmap.softwareCopy(): Bitmap =
         if (config == Bitmap.Config.HARDWARE) {
-            copy(Bitmap.Config.ARGB_8888, false) ?: this
+            copy(Bitmap.Config.ARGB_8888, false) ?: run {
+                // Returning the hardware bitmap keeps the caller alive but fails later
+                // at `getPixels()` with an exception that points at the wrong frame.
+                Log.w(TAG, "software copy of a HARDWARE bitmap failed; trim skipped")
+                this
+            }
         } else {
             this
         }
@@ -372,6 +387,8 @@ class ArtworkRepository(private val context: Context) {
         )
 
     companion object {
+        private const val TAG = "ArtworkRepository"
+
         /** 52 dp rows at 3.5x density need 182 px; 192 leaves a small margin. */
         private const val LIST_THUMB_SIZE = 192
         /** The player renders the cover full-width, so it keeps the larger source. */

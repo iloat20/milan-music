@@ -1,6 +1,7 @@
 package com.milan.music.data.media
 
 import android.content.Context
+import android.util.Log
 import androidx.core.net.toUri
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -84,9 +85,32 @@ class LibraryCacheStore(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = ListSerializer(CachedTrack.serializer())
 
+    /** Rows and watermark exactly as they stood in a single DataStore read. */
+    data class Snapshot(val tracks: List<Track>, val stamp: IndexStamp?)
+
     suspend fun load(): List<Track> = withContext(Dispatchers.Default) {
-        val raw = preferences()[tracksKey] ?: return@withContext emptyList()
-        runCatching { json.decodeFromString(serializer, raw) }
+        decode(preferences()[tracksKey])
+    }
+
+    /**
+     * Rows and watermark from one read, so the "rescan or not" decision cannot straddle
+     * a concurrent [save].
+     *
+     * The two used to be separate calls, and a [save] landing between them pairs the
+     * rows of one generation with the watermark of another: `rows = old, stamp = new`
+     * makes the next launch skip a scan it needed, and `rows = new, stamp = old` costs
+     * a redundant full scan. Neither corrupts the cache, but only a single read makes
+     * the comparison mean what the caller assumes.
+     */
+    suspend fun snapshot(): Snapshot = withContext(Dispatchers.Default) {
+        val stored = preferences()
+        Snapshot(tracks = decode(stored[tracksKey]), stamp = stored.stamp())
+    }
+
+    private fun decode(raw: String?): List<Track> {
+        if (raw == null) return emptyList()
+        return runCatching { json.decodeFromString(serializer, raw) }
+            .onFailure { Log.w(TAG, "cached library payload unreadable; falling back to a scan", it) }
             .getOrDefault(emptyList())
             .map { it.toTrack() }
     }
@@ -97,15 +121,12 @@ class LibraryCacheStore(private val context: Context) {
      * Null is not an error: it makes the first launch after an upgrade take the
      * full-scan path once, which then rewrites the cache with a stamp.
      */
-    suspend fun loadStamp(): IndexStamp? = withContext(Dispatchers.Default) {
-        val preferences = preferences()
-        if (!preferences.contains(generationKey) && !preferences.contains(countKey)) {
-            return@withContext null
-        }
-        IndexStamp(
-            generation = preferences[generationKey],
-            count = preferences[countKey] ?: -1L,
-            newestModified = preferences[newestKey] ?: -1L,
+    private fun Preferences.stamp(): IndexStamp? {
+        if (!contains(generationKey) && !contains(countKey)) return null
+        return IndexStamp(
+            generation = this[generationKey],
+            count = this[countKey] ?: -1L,
+            newestModified = this[newestKey] ?: -1L,
         )
     }
 
@@ -134,4 +155,8 @@ class LibraryCacheStore(private val context: Context) {
             if (throwable is IOException) emit(emptyPreferences()) else throw throwable
         }
         .first()
+
+    private companion object {
+        const val TAG = "LibraryCache"
+    }
 }

@@ -152,7 +152,11 @@ class LibraryViewModel(
         if (cacheLoaded) return
         cacheLoaded = true
         viewModelScope.launch {
-            val cached = libraryCache.load()
+            // Rows and watermark from a single read: two separate reads can straddle a
+            // concurrent save, which would pair the rows of one generation with the
+            // watermark of another.
+            val snapshot = libraryCache.snapshot()
+            val cached = snapshot.tracks
             // Taken once, before any row is read, then reused for the write below.
             //
             // Two reasons the *pre-read* value is the correct one to store. First
@@ -172,7 +176,7 @@ class LibraryViewModel(
 
                 // The stamp is written in the same commit as the rows, so a match
                 // means the snapshot still describes what the provider has indexed.
-                val stored = libraryCache.loadStamp()
+                val stored = snapshot.stamp
                 if (stamp.sameAs(stored)) {
                     Log.i(TAG, "library unchanged (${stored?.describe()}), rescan skipped")
                     return@launch
@@ -184,17 +188,27 @@ class LibraryViewModel(
             // An empty result while a non-empty cache exists almost always means the
             // index was momentarily unavailable; do not wipe the user's library.
             if (fresh.isEmpty() && cached.isNotEmpty()) {
+                Log.w(
+                    TAG,
+                    "rescan returned 0 tracks while ${cached.size} are cached; " +
+                        "keeping the cache and forcing a rescan next launch",
+                )
                 loading.value = false
                 return@launch
             }
 
-            val cachedIds = cached.mapTo(HashSet()) { it.id }
-            val freshIds = fresh.mapTo(HashSet()) { it.id }
-
-            if (cachedIds != freshIds) {
+            // Compare whole rows, not id sets. Re-tagging a file rewrites title,
+            // artist and album in place: the ids — and the row count — stay identical,
+            // so an id comparison reads "nothing changed" and throws away the very
+            // metadata the generation check just sent us here to fetch. Worse, the
+            // save below still runs, stamping the *old* rows as current, so the next
+            // launch matches and skips too: the change never surfaces without a manual
+            // refresh. `Track` is a data class over the same columns the cache
+            // serialises, so list equality is exactly "what the user sees differs".
+            if (cached != fresh) {
                 allTracks.value = fresh
             }
-            // Saved even when the ids match: the payload also carries the stamp, and
+            // Saved even when the rows match: the payload also carries the stamp, and
             // this is what lets the next launch skip the scan. A cache written before
             // the stamp existed has none, so it fails the comparison exactly once and
             // heals here.
