@@ -23,6 +23,13 @@ import kotlinx.coroutines.launch
 
 data class PlayerUiState(
     val currentTrack: Track? = null,
+    /**
+     * Neighbouring tracks in the *playback* order, already resolved through
+     * shuffle. Used by the player screen to mount the covers on both sides of
+     * the current one; `null` when the queue has no other track.
+     */
+    val previousTrack: Track? = null,
+    val nextTrack: Track? = null,
     val isPlaying: Boolean = false,
     val queueSize: Int = 0,
 ) {
@@ -284,6 +291,22 @@ class PlayerController(
         }
     }
 
+    /**
+     * Always moves to the previous queue item, ignoring [previous]'s restart window.
+     *
+     * The cover swipe already revealed the previous cover under the finger; jumping
+     * back to 0:00 of the *current* track there would contradict what the gesture
+     * showed. The transport button keeps the standard 3-second behaviour.
+     */
+    fun skipToPrevious() {
+        val mediaController = controller ?: return
+        if (mediaController.hasPreviousMediaItem()) {
+            mediaController.seekToPreviousMediaItem()
+        } else {
+            mediaController.seekTo(0L)
+        }
+    }
+
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
         controller?.seekTo(clamped)
@@ -301,6 +324,20 @@ class PlayerController(
         val currentTrack = mediaItem?.mediaId
             ?.let(trackIndex::get)
             ?: queue.getOrNull(mediaController.currentMediaItemIndex)
+
+        // The player's own indices, not queue[current ± 1]: shuffle reorders the
+        // timeline, and REPEAT_MODE_ALL is pinned on, so the neighbours wrap around
+        // exactly the way the transport buttons do. A one-track queue reports the
+        // current item as its own neighbour; drop it so the cover swipe cannot
+        // offer a transition that goes nowhere.
+        fun neighborAt(index: Int): Track? {
+            if (index !in 0 until mediaController.mediaItemCount) return null
+            return trackIndex.get(mediaController.getMediaItemAt(index).mediaId)
+                ?.takeIf { it.id != currentTrack?.id }
+        }
+
+        val previousTrack = neighborAt(mediaController.previousMediaItemIndex)
+        val nextTrack = neighborAt(mediaController.nextMediaItemIndex)
         Log.d(
             TAG,
             "refresh: mediaId=${mediaItem?.mediaId} " +
@@ -311,6 +348,8 @@ class PlayerController(
         _state.update { previous ->
             PlayerUiState(
                 currentTrack = currentTrack ?: previous.currentTrack,
+                previousTrack = previousTrack,
+                nextTrack = nextTrack,
                 isPlaying = mediaController.isPlaying,
                 queueSize = mediaController.mediaItemCount,
             ).let { next ->

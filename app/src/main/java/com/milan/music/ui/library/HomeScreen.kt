@@ -12,6 +12,22 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,11 +70,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -75,6 +92,7 @@ import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.MiniPlayer
 import com.milan.music.ui.glass.GlassSurface
 import com.milan.music.ui.theme.LocalGlassColors
+import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.noRippleCombinedClickable
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -205,7 +223,17 @@ fun HomeScreen(
                 .fillMaxSize()
                 .statusBarsPadding(),
         ) {
-            if (mainTab == 0) {
+            // 搜索栏只属于曲库页。切到"喜欢"时让它收高度而不是瞬间消失，
+            // 否则下面的列表会先向上跳一行，再开始自己的过渡。
+            AnimatedVisibility(
+                visible = mainTab == 0,
+                enter = expandVertically(
+                    animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
+                ) + fadeIn(tween(MilanMotion.FastMs)),
+                exit = shrinkVertically(
+                    animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
+                ) + fadeOut(tween(MilanMotion.FastMs)),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -229,9 +257,27 @@ fun HomeScreen(
                 }
             }
 
-            Box(Modifier.weight(1f)) {
-                when (mainTab) {
-                    0 -> SongsList(
+            // 曲库/喜欢切换：新列表从下方少许滑入并淡入，旧列表短淡出。
+            // 模糊源挂在容器上而不是列表里：曲库、喜欢、以及空的"喜欢"页都
+            // 共用这一个 source，切 tab 时不会先把源摘掉再挂上，底部玻璃也就
+            // 不会因为某一帧没有源而丢掉模糊。
+            AnimatedContent(
+                targetState = mainTab,
+                modifier = Modifier
+                    .weight(1f)
+                    .hazeSource(hazeState),
+                transitionSpec = {
+                    val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 20 } +
+                        fadeIn(tween(MilanMotion.MediumMs))
+                    val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 20 } +
+                        fadeOut(tween(MilanMotion.FastMs))
+                    enter togetherWith exit
+                },
+                contentKey = { it },
+                label = "library-tab",
+            ) { tab ->
+                if (tab == 0) {
+                    SongsList(
                         tracks = state.tracks,
                         artworkRepository = container.artwork,
                         currentTrackId = playerState.currentTrack?.id,
@@ -240,11 +286,10 @@ fun HomeScreen(
                         onPlay = playList,
                         onToggleFavorite = viewModel::toggleFavorite,
                         contentPadding = contentPadding,
-                        hazeState = hazeState,
                         isLoading = state.loading,
                     )
-
-                    else -> SongsList(
+                } else {
+                    SongsList(
                         tracks = state.favorites,
                         artworkRepository = container.artwork,
                         currentTrackId = playerState.currentTrack?.id,
@@ -253,7 +298,6 @@ fun HomeScreen(
                         onPlay = playList,
                         onToggleFavorite = viewModel::toggleFavorite,
                         contentPadding = contentPadding,
-                        hazeState = hazeState,
                         isLoading = state.loading,
                     )
                 }
@@ -268,16 +312,25 @@ fun HomeScreen(
                 .padding(horizontal = 14.dp)
                 .padding(bottom = 10.dp),
         ) {
-            if (playerState.hasQueue && playerState.currentTrack != null) {
-                MiniPlayer(
-                    state = playerState,
-                    artworkRepository = container.artwork,
-                    hazeState = hazeState,
-                    onClick = onOpenPlayer,
-                    onTogglePlay = container.player::togglePlayPause,
-                    onNext = container.player::next,
-                )
-                Spacer(Modifier.height(10.dp))
+            // 迷你播放器随队列出现/消失，底部玻璃导航栏保持贴底不动。
+            AnimatedVisibility(
+                visible = playerState.hasQueue && playerState.currentTrack != null,
+                enter = fadeIn(tween(MilanMotion.MediumMs)) +
+                    slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 },
+                exit = fadeOut(tween(MilanMotion.FastMs)) +
+                    slideOutVertically(tween(MilanMotion.FastMs)) { it / 3 },
+            ) {
+                Column {
+                    MiniPlayer(
+                        state = playerState,
+                        artworkRepository = container.artwork,
+                        hazeState = hazeState,
+                        onClick = onOpenPlayer,
+                        onTogglePlay = container.player::togglePlayPause,
+                        onNext = container.player::next,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
             }
             GlassBottomBar(
                 selected = mainTab,
@@ -290,7 +343,20 @@ fun HomeScreen(
             )
         }
 
-        if (sortMenuOpen) {
+        // 排序面板从右上角展开，方向和触发按钮一致；遮罩层一起淡入。
+        AnimatedVisibility(
+            visible = sortMenuOpen,
+            enter = fadeIn(tween(MilanMotion.FastMs)) + scaleIn(
+                initialScale = 0.94f,
+                transformOrigin = TransformOrigin(1f, 0f),
+                animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
+            ),
+            exit = fadeOut(tween(MilanMotion.FastMs)) + scaleOut(
+                targetScale = 0.96f,
+                transformOrigin = TransformOrigin(1f, 0f),
+                animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
+            ),
+        ) {
             SortMenuOverlay(
                 hazeState = hazeState,
                 selected = state.sortMode,
@@ -373,7 +439,13 @@ private fun SearchField(
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             )
-            if (value.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = value.isNotEmpty(),
+                enter = expandHorizontally(expandFrom = Alignment.End) +
+                    fadeIn(tween(MilanMotion.FastMs)),
+                exit = shrinkHorizontally(shrinkTowards = Alignment.End) +
+                    fadeOut(tween(MilanMotion.FastMs)),
+            ) {
                 IconButton(
                     onClick = { onValueChange("") },
                     modifier = Modifier.size(26.dp),
@@ -478,11 +550,26 @@ private fun GlassBottomBar(
         ) {
             tabs.forEachIndexed { index, tab ->
                 val active = selected == index
+                val tint by animateColorAsState(
+                    targetValue = if (active) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
+                    },
+                    animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
+                    label = "tab-tint-$index",
+                )
+                val iconScale by animateFloatAsState(
+                    targetValue = if (active) 1.08f else 1f,
+                    animationSpec = MilanMotion.Press,
+                    label = "tab-icon-scale-$index",
+                )
+
                 Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(18.dp))
                         .noRippleCombinedClickable(
                             role = Role.Tab,
+                            pressScale = 0.94f,
                             onClick = { onSelect(index) },
                             onLongClick = if (index == 0) onRescan else null,
                         )
@@ -492,22 +579,19 @@ private fun GlassBottomBar(
                     Icon(
                         imageVector = tab.icon,
                         contentDescription = tab.label,
-                        tint = if (active) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
-                        },
-                        modifier = Modifier.size(22.dp),
+                        tint = tint,
+                        modifier = Modifier
+                            .size(22.dp)
+                            .graphicsLayer {
+                                scaleX = iconScale
+                                scaleY = iconScale
+                            },
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
                         text = tab.label,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (active) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
-                        },
+                        color = tint,
                     )
                 }
             }

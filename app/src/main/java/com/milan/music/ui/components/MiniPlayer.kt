@@ -1,6 +1,12 @@
 package com.milan.music.ui.components
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,13 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.play.PlayerUiState
 import com.milan.music.ui.glass.GlassSurface
+import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.noRippleClickable
 import dev.chrisbanes.haze.HazeState
 
@@ -45,13 +50,20 @@ fun MiniPlayer(
 
     GlassSurface(
         hazeState = hazeState,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            // 整张卡片是一个点击目标；内层播放/下一首按钮会先消费点击。
+            // 玻璃面板上不加涟漪，改用轻微缩放作为按压反馈。
+            .noRippleClickable(
+                role = Role.Button,
+                pressScale = 0.985f,
+                onClick = onClick,
+            ),
         shape = RoundedCornerShape(26.dp),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
                 .padding(start = 9.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -65,21 +77,38 @@ fun MiniPlayer(
 
             Spacer(Modifier.width(11.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.displayTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = track.displayArtist,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            // 切歌时只让封面、标题、艺人这一块做短距离交接；
+            // 右侧播放控制保持原位，避免整行一起晃动。
+            AnimatedContent(
+                targetState = track,
+                modifier = Modifier.weight(1f),
+                transitionSpec = {
+                    val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 } +
+                        fadeIn(tween(MilanMotion.MediumMs))
+                    val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 3 } +
+                        fadeOut(tween(MilanMotion.FastMs))
+                    enter togetherWith exit
+                },
+                contentAlignment = Alignment.CenterStart,
+                contentKey = { it.id },
+                label = "mini-player-track",
+            ) { item ->
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        text = item.displayTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = item.displayArtist,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
 
             Spacer(Modifier.width(6.dp))
@@ -88,24 +117,27 @@ fun MiniPlayer(
                 Box(
                     modifier = Modifier
                         .size(48.dp)
-                        .noRippleClickable(role = Role.Button, onClick = onTogglePlay),
+                        .noRippleClickable(
+                            role = Role.Button,
+                            pressScale = 0.86f,
+                            onClick = onTogglePlay,
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = if (state.isPlaying) {
-                            Icons.Rounded.Pause
-                        } else {
-                            Icons.Rounded.PlayArrow
-                        },
-                        contentDescription = if (state.isPlaying) "暂停" else "播放",
+                    AnimatedPlayPauseIcon(
+                        isPlaying = state.isPlaying,
                         tint = MaterialTheme.colorScheme.onBackground,
-                        modifier = Modifier.size(30.dp),
+                        iconSize = 30.dp,
                     )
                 }
                 Box(
                     modifier = Modifier
                         .size(48.dp)
-                        .noRippleClickable(role = Role.Button, onClick = onNext),
+                        .noRippleClickable(
+                            role = Role.Button,
+                            pressScale = 0.86f,
+                            onClick = onNext,
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

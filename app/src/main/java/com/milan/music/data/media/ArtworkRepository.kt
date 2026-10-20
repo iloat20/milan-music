@@ -17,6 +17,7 @@ import androidx.core.net.toUri
 import com.milan.music.data.model.Track
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
@@ -125,14 +126,24 @@ class ArtworkRepository(private val context: Context) {
         playerCache.get(track.albumId)?.let { return it.asImageBitmap() }
 
         val own = CompletableDeferred<ImageBitmap?>()
-        pendingPlayer.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
+        pendingPlayer.putIfAbsent(track.albumId, own)?.let { inFlight ->
+            // The producer can be cancelled mid-decode: the cover carousel cancels
+            // the outgoing page's effect exactly when that artwork becomes the
+            // current one. Re-check the cache the producer may have filled anyway.
+            return inFlight.await() ?: playerCache.get(track.albumId)?.asImageBitmap()
+        }
 
         var result: ImageBitmap? = null
         try {
-            val decoded = withContext(Dispatchers.IO) {
-                decodeBitmap(track, PLAYER_THUMB_SIZE)?.let(::trimLightMargins)
+            // The decoded bitmap is the hand-off between the neighbouring page and
+            // the page that replaces it, so it must survive cancellation of the
+            // caller. Keep the put inside the non-cancellable block: the caller can
+            // be cancelled on the way out of `withContext`, before the line below.
+            val decoded = withContext(Dispatchers.IO + NonCancellable) {
+                decodeBitmap(track, PLAYER_THUMB_SIZE)?.let(::trimLightMargins)?.also {
+                    playerCache.put(track.albumId, it)
+                }
             }
-            if (decoded != null) playerCache.put(track.albumId, decoded)
             result = decoded?.asImageBitmap()
             return result
         } finally {
@@ -169,6 +180,16 @@ class ArtworkRepository(private val context: Context) {
     }
 
     fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
+
+    /**
+     * Trimmed player artwork already decoded for this album, or `null`.
+     *
+     * The player screen mounts the neighbouring covers ahead of the gesture, so by
+     * the time one of them becomes the current page its bitmap is already in
+     * [playerCache]. Reading it synchronously here keeps that hand-off free of a
+     * one-frame placeholder flash.
+     */
+    fun cachedPlayer(albumId: Long): ImageBitmap? = playerCache.get(albumId)?.asImageBitmap()
 
     /**
      * Releases cached covers when the process is told to shed memory.

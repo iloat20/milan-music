@@ -1,5 +1,8 @@
 package com.milan.music.ui.library
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,8 +17,7 @@ import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
 import com.milan.music.ui.components.EmptyState
 import com.milan.music.ui.components.TrackRow
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import com.milan.music.ui.theme.MilanMotion
 
 @Composable
 fun SongsList(
@@ -27,7 +29,6 @@ fun SongsList(
     onPlay: (List<Track>, Int) -> Unit,
     onToggleFavorite: (Long) -> Unit,
     contentPadding: PaddingValues,
-    hazeState: HazeState,
     modifier: Modifier = Modifier,
     isLoading: Boolean = false,
 ) {
@@ -53,7 +54,7 @@ fun SongsList(
     }
 
     LazyColumn(
-        modifier = modifier.fillMaxSize().hazeSource(hazeState),
+        modifier = modifier.fillMaxSize(),
         contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -66,6 +67,13 @@ fun SongsList(
                 isFavorite = track.id in favoriteIds,
                 onClick = { onPlay(tracks, index) },
                 onToggleFavorite = { onToggleFavorite(track.id) },
+                // 搜索过滤或增删歌曲时，落位用弹簧、出现/消失用短淡入淡出。
+                // 只对可见项生效，长列表没有额外成本。
+                modifier = Modifier.animateItem(
+                    fadeInSpec = tween(MilanMotion.MediumMs),
+                    placementSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                    fadeOutSpec = tween(MilanMotion.FastMs),
+                ),
             )
         }
     }

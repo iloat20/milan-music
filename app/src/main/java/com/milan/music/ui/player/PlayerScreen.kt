@@ -3,16 +3,27 @@ package com.milan.music.ui.player
 import android.app.Activity
 import android.graphics.Bitmap
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -34,8 +45,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Icon
@@ -47,16 +56,19 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -69,6 +81,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -78,20 +91,44 @@ import com.milan.music.data.model.Track
 import com.milan.music.data.userdata.UserData
 import com.milan.music.di.AppContainer
 import com.milan.music.play.PlaybackProgress
+import com.milan.music.ui.components.AnimatedPlayPauseIcon
 import com.milan.music.ui.components.CoverArt
 import com.milan.music.ui.theme.LikedRed
+import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.formatDuration
+import com.milan.music.ui.util.noRippleClickable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
 private val OnDark = Color(0xFFF6F1E8)
 private val OnDarkMuted = Color(0xB3F6F1E8)
 private val OnDarkFaint = Color(0x66F6F1E8)
 private val FallbackTint = Color(0xFF241C15)
+
+/** Fraction of the cover a swipe may expose when there is no neighbour on that side. */
+private const val EDGE_RESISTANCE = 0.16f
+
+/** How long a committed swipe waits for the session to confirm the new track. */
+private const val SWITCH_TIMEOUT_MS = 600L
+
+/**
+ * The three covers mounted around the current track, in playback order.
+ *
+ * Kept as local state by the player screen instead of reading [com.milan.music.play.PlayerUiState]
+ * directly: a committed swipe shifts the row and resets its offset in one frame,
+ * which is only pixel-continuous if the position and the pages change together.
+ */
+private data class CoverPages(
+    val previous: Track? = null,
+    val current: Track? = null,
+    val next: Track? = null,
+)
 
 @Composable
 fun PlayerScreen(
@@ -109,8 +146,10 @@ fun PlayerScreen(
     val density = LocalDensity.current
     val dismissThreshold = with(density) { 110.dp.toPx() }
 
-    var backdrop by remember(track?.id) { mutableStateOf<ImageBitmap?>(null) }
-    var dominant by remember(track?.id) { mutableStateOf<Color?>(null) }
+    // 不按 track.id 重置：新封面解码完成前继续显示上一张，
+    // 否则每次切歌都会先闪一下纯色底。解码成功后 Crossfade 再接管。
+    var backdrop by remember { mutableStateOf<ImageBitmap?>(null) }
+    var dominant by remember { mutableStateOf<Color?>(null) }
 
     LaunchedEffect(track?.id) {
         val target = track ?: return@LaunchedEffect
@@ -151,11 +190,51 @@ fun PlayerScreen(
     val offsetY = remember { Animatable(0f) }
     val isSettling = remember { mutableStateOf(false) }
 
-    // Cover page-flip: horizontal swipes and double-taps animate the cover out in
-    // the swipe direction, switch tracks, then slide the new cover in from the far
-    // side. `isCoverAnimating` guards against re-entry mid-flight.
+    // 页面自下而上滑入的同时，封面做一次很轻的 0.94→1 落位。
+    // 不是共享元素，只是给进场一个视觉重心，幅度刻意控制在几乎察觉不到的程度。
+    val coverEntrance = remember { Animatable(0.94f) }
+    LaunchedEffect(Unit) {
+        coverEntrance.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(
+                dampingRatio = 0.82f,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+        )
+    }
+
+    // Cover carousel: the previous and next artwork are mounted one page to
+    // either side of the current one. Both are decoded while the player is open,
+    // so a drag reveals the real cover instead of the blurred backdrop.
+    //
+    // `coverPages` is a local snapshot rather than a direct read of `playerState`:
+    // a committed swipe has to shift the row and reset the offset in the same
+    // frame, while the session still reports the outgoing track for a few
+    // milliseconds after the seek.
+    var coverPages by remember {
+        mutableStateOf(
+            CoverPages(
+                previous = playerState.previousTrack,
+                current = playerState.currentTrack,
+                next = playerState.nextTrack,
+            ),
+        )
+    }
     val coverOffsetX = remember { Animatable(0f) }
     val isCoverAnimating = remember { mutableStateOf(false) }
+
+    // Track changes the gesture did not initiate: song end, notification,
+    // Bluetooth, widget. Swipes update `coverPages` themselves and wait for the
+    // session, so their transient state must not overwrite the shifted row.
+    LaunchedEffect(playerState.previousTrack, playerState.currentTrack, playerState.nextTrack) {
+        if (!isCoverAnimating.value) {
+            coverPages = CoverPages(
+                previous = playerState.previousTrack,
+                current = playerState.currentTrack,
+                next = playerState.nextTrack,
+            )
+        }
+    }
 
     // Measured height of the sheet, published by BoxWithConstraints below. Needed
     // because the dismissal can start from outside that scope (system back).
@@ -275,27 +354,15 @@ fun PlayerScreen(
         // Square cover sized to the width, but capped so it never collides with the
         // controls on short screens.
         val coverSide = minOf(maxWidth, maxHeight * 0.52f)
-        // Background: blurred artwork tinted by its own dominant colour. Scaling a
-        // square cover to a 9:19.5 screen would zoom it ~2.2x and crop away most of
-        // the image, so the crisp cover stays 1:1 and only the backdrop stretches.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(gradientTop, coverBackground, gradientBottom))),
+        // 背景：模糊封面叠在由封面主色生成的渐变上。方形封面若拉伸到
+        // 9:19.5 的屏幕会被放大 ~2.2 倍并裁掉大半，所以清晰封面保持 1:1，
+        // 只让背景层铺满。颜色与图片各自做慢速交叉淡入，切歌不闪白/闪黑。
+        PlayerBackdrop(
+            top = gradientTop,
+            middle = coverBackground,
+            bottom = gradientBottom,
+            backdrop = backdrop,
         )
-
-        val backdropImage = backdrop
-        if (backdropImage != null) {
-            Image(
-                bitmap = backdropImage,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(48.dp)
-                    .alpha(0.55f),
-            )
-        }
 
         Box(
             modifier = Modifier
@@ -312,27 +379,60 @@ fun PlayerScreen(
 
         val coverSidePx = with(density) { coverSide.toPx() }
 
-        // Slide the cover out in the swipe direction, switch tracks, slide the new
-        // one in from the opposite edge.
+        // Past the threshold the row finishes the slide, the player changes track,
+        // and the offset resets only once the session confirms the incoming track.
+        // The cover under the finger then becomes the current page pixel for pixel:
+        // no blank gap, no second slide-in.
         val launchCoverSwitch: (Boolean) -> Unit = { toNext ->
             if (!isCoverAnimating.value) {
-                isCoverAnimating.value = true
-                scope.launch {
-                    val dir = if (toNext) -1f else 1f
-                    coverOffsetX.animateTo(
-                        dir * coverSidePx,
-                        tween(180, easing = FastOutSlowInEasing),
-                    )
-                    if (toNext) container.player.next() else container.player.previous()
-                    coverOffsetX.snapTo(-dir * coverSidePx)
-                    coverOffsetX.animateTo(
-                        0f,
-                        tween(240, easing = FastOutSlowInEasing),
-                    )
-                    isCoverAnimating.value = false
+                val incoming = if (toNext) coverPages.next else coverPages.previous
+                if (incoming != null) {
+                    isCoverAnimating.value = true
+                    scope.launch {
+                        val target = if (toNext) -coverSidePx else coverSidePx
+                        coverOffsetX.animateTo(
+                            target,
+                            tween(160, easing = FastOutSlowInEasing),
+                        )
+
+                        // The transport's previous() restarts the current song when
+                        // it has been playing for more than 3 s. A swipe revealed the
+                        // previous cover, so it must move to that track instead.
+                        if (toNext) container.player.next() else container.player.skipToPrevious()
+
+                        // The controller is asynchronous. Hold the row on the
+                        // incoming page until the session actually reports it, then
+                        // adopt its neighbours and reset the offset together.
+                        val switched = withTimeoutOrNull(SWITCH_TIMEOUT_MS) {
+                            container.player.state.first { it.currentTrack?.id == incoming.id }
+                        } != null
+                        if (switched) {
+                            val latest = container.player.state.value
+                            coverPages = CoverPages(
+                                previous = latest.previousTrack,
+                                current = latest.currentTrack,
+                                next = latest.nextTrack,
+                            )
+                            coverOffsetX.snapTo(0f)
+                        } else {
+                            // The seek never landed (session gone): put the row
+                            // back rather than showing a track that is not playing.
+                            coverOffsetX.animateTo(
+                                0f,
+                                spring(stiffness = Spring.StiffnessMediumLow),
+                            )
+                        }
+                        isCoverAnimating.value = false
+                    }
                 }
             }
         }
+
+        // Read inside the gesture detector, never as pointerInput keys: a track
+        // change during a drag updates the reveal target without cancelling the
+        // gesture in progress.
+        val latestCoverPages by rememberUpdatedState(coverPages)
+        val latestLaunchCoverSwitch by rememberUpdatedState(launchCoverSwitch)
 
         Box(
             modifier = Modifier
@@ -340,26 +440,55 @@ fun PlayerScreen(
                 .statusBarsPadding()
                 .padding(top = 20.dp)
                 .size(coverSide)
-                .graphicsLayer { translationX = coverOffsetX.value }
-                .pointerInput(Unit) {
+                .graphicsLayer {
+                    scaleX = coverEntrance.value
+                    scaleY = coverEntrance.value
+                }
+                // The neighbouring pages sit outside this square at rest; clip
+                // them so they only enter through the edges while dragging.
+                .clipToBounds()
+                .pointerInput(coverSidePx) {
                     // Cover follows the finger horizontally; on release past the
-                    // threshold the page-flip completes, otherwise it springs back.
-                    // Level with the vertical drag on the root: the gesture system
-                    // routes each drag by its dominant direction.
+                    // threshold the carousel finishes the page, otherwise it springs
+                    // back. Level with the vertical drag on the root: the gesture
+                    // system routes each drag by its dominant direction.
+                    //
+                    // Pages and the switch action are read through
+                    // rememberUpdatedState so a track change during the gesture
+                    // updates what the next frame reveals without tearing down the
+                    // drag detector (the pointerInput key is only the page width).
                     val swipeThreshold = 80.dp.toPx()
                     detectHorizontalDragGestures(
                         onDragStart = { },
                         onHorizontalDrag = { change, dragAmount ->
                             if (!isCoverAnimating.value) {
-                                scope.launch { coverOffsetX.snapTo(coverOffsetX.value + dragAmount) }
+                                // A missing neighbour (single-track queue) may only
+                                // stretch a little, never far enough to commit.
+                                val min = if (latestCoverPages.next != null) {
+                                    -coverSidePx
+                                } else {
+                                    -coverSidePx * EDGE_RESISTANCE
+                                }
+                                val max = if (latestCoverPages.previous != null) {
+                                    coverSidePx
+                                } else {
+                                    coverSidePx * EDGE_RESISTANCE
+                                }
+                                val target = (coverOffsetX.value + dragAmount)
+                                    .coerceIn(min, max)
+                                scope.launch { coverOffsetX.snapTo(target) }
                             }
                             change.consume()
                         },
                         onDragEnd = {
-                            if (isCoverAnimating.value) return@detectHorizontalDragGestures
+                            if (isCoverAnimating.value) {
+                                return@detectHorizontalDragGestures
+                            }
                             when {
-                                coverOffsetX.value < -swipeThreshold -> launchCoverSwitch(true)
-                                coverOffsetX.value > swipeThreshold -> launchCoverSwitch(false)
+                                coverOffsetX.value < -swipeThreshold &&
+                                    latestCoverPages.next != null -> latestLaunchCoverSwitch(true)
+                                coverOffsetX.value > swipeThreshold &&
+                                    latestCoverPages.previous != null -> latestLaunchCoverSwitch(false)
                                 else -> scope.launch {
                                     coverOffsetX.animateTo(
                                         0f,
@@ -382,17 +511,34 @@ fun PlayerScreen(
                 }
                 .combinedClickable(
                     onClick = { },
-                    onDoubleClick = { launchCoverSwitch(true) },
+                    onDoubleClick = { latestLaunchCoverSwitch(true) },
                 ),
         ) {
-            CoverArt(
-                track = track,
+            // Both neighbours stay composed for the whole session so their
+            // artwork is decoded before the finger moves. Draw order is left,
+            // current, right; pure translation keeps them from overlapping.
+            CoverSlot(
+                track = coverPages.previous,
+                slot = -1,
+                coverSidePx = coverSidePx,
+                offsetX = coverOffsetX,
                 artworkRepository = container.artwork,
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 0.dp,
-                iconSize = 72.dp,
-                trimMargins = true,
-                contentScale = ContentScale.Crop,
+                backgroundColor = coverBackground,
+            )
+            CoverSlot(
+                track = coverPages.current,
+                slot = 0,
+                coverSidePx = coverSidePx,
+                offsetX = coverOffsetX,
+                artworkRepository = container.artwork,
+                backgroundColor = coverBackground,
+            )
+            CoverSlot(
+                track = coverPages.next,
+                slot = 1,
+                coverSidePx = coverSidePx,
+                offsetX = coverOffsetX,
+                artworkRepository = container.artwork,
                 backgroundColor = coverBackground,
             )
         }
@@ -406,22 +552,39 @@ fun PlayerScreen(
                 .padding(bottom = 100.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = track?.displayTitle ?: "未在播放",
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = OnDark,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = track?.displayArtist ?: "",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = OnDarkMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                // 标题/艺人整块做上下交接：新内容从下方少许进入，旧内容向上退出。
+                // 只在曲目 id 变化时触发，播放进度与收藏状态不会打断文字。
+                AnimatedContent(
+                    targetState = track,
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = {
+                        val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 } +
+                            fadeIn(tween(MilanMotion.MediumMs))
+                        val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 3 } +
+                            fadeOut(tween(MilanMotion.FastMs))
+                        enter togetherWith exit
+                    },
+                    contentAlignment = Alignment.CenterStart,
+                    contentKey = { it?.id },
+                    label = "player-track-text",
+                ) { item ->
+                    Column {
+                        Text(
+                            text = item?.displayTitle ?: "未在播放",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = OnDark,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = item?.displayArtist ?: "",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = OnDarkMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 IconButton(
                     onClick = {
@@ -430,16 +593,37 @@ fun PlayerScreen(
                     },
                     modifier = Modifier.size(44.dp),
                 ) {
-                    Icon(
-                        imageVector = if (isFavorite) {
-                            Icons.Rounded.Favorite
-                        } else {
-                            Icons.Rounded.FavoriteBorder
+                    AnimatedContent(
+                        targetState = isFavorite,
+                        transitionSpec = {
+                            val enter = scaleIn(
+                                initialScale = 0.55f,
+                                animationSpec = spring(
+                                    dampingRatio = 0.45f,
+                                    stiffness = Spring.StiffnessMediumLow,
+                                ),
+                            ) + fadeIn(tween(MilanMotion.FastMs))
+                            val exit = scaleOut(
+                                targetScale = 0.7f,
+                                animationSpec = tween(MilanMotion.FastMs),
+                            ) + fadeOut(tween(MilanMotion.FastMs / 2))
+                            enter togetherWith exit
                         },
-                        contentDescription = "喜欢",
-                        tint = if (isFavorite) LikedRed else OnDark,
-                        modifier = Modifier.size(24.dp),
-                    )
+                        contentAlignment = Alignment.Center,
+                        contentKey = { it },
+                        label = "player-favorite",
+                    ) { liked ->
+                        Icon(
+                            imageVector = if (liked) {
+                                Icons.Rounded.Favorite
+                            } else {
+                                Icons.Rounded.FavoriteBorder
+                            },
+                            contentDescription = if (liked) "取消喜欢" else "喜欢",
+                            tint = if (liked) LikedRed else OnDark,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
             }
 
@@ -460,6 +644,109 @@ fun PlayerScreen(
                 onNext = container.player::next,
             )
         }
+    }
+}
+
+/**
+ * 播放页背景：主色渐变 + 模糊封面。
+ *
+ * 把颜色动画收在这个小 composable 里，切歌时只重绘背景层，
+ * 不会让标题、进度条、封面轮播跟着每帧重组。
+ */
+@Composable
+private fun PlayerBackdrop(
+    top: Color,
+    middle: Color,
+    bottom: Color,
+    backdrop: ImageBitmap?,
+) {
+    val animatedTop by animateColorAsState(
+        targetValue = top,
+        animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
+        label = "backdrop-top",
+    )
+    val animatedMiddle by animateColorAsState(
+        targetValue = middle,
+        animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
+        label = "backdrop-middle",
+    )
+    val animatedBottom by animateColorAsState(
+        targetValue = bottom,
+        animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
+        label = "backdrop-bottom",
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(listOf(animatedTop, animatedMiddle, animatedBottom)),
+            ),
+    ) {
+        Crossfade(
+            targetState = backdrop,
+            modifier = Modifier
+                .fillMaxSize()
+                // 模糊放在 Crossfade 外层：过渡期间只做一次全屏模糊，
+                // 而不是新旧两张图各模糊一次。
+                .blur(48.dp)
+                .alpha(0.55f),
+            animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
+            label = "player-backdrop-image",
+        ) { image ->
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One page of the three-cover carousel.
+ *
+ * The page is laid out at the centre of the clipping box and translated by its
+ * slot position plus the drag offset. Reading the offset inside `graphicsLayer`
+ * keeps the drag out of recomposition: only the layer's translation changes per
+ * pointer event.
+ *
+ * `null` neighbours are omitted entirely (a one-track queue has none); the
+ * current slot still renders [CoverArt]'s deterministic placeholder when nothing
+ * is queued, matching the previous single-cover behaviour.
+ */
+@Composable
+private fun CoverSlot(
+    track: Track?,
+    slot: Int,
+    coverSidePx: Float,
+    offsetX: Animatable<Float, AnimationVector1D>,
+    artworkRepository: ArtworkRepository,
+    backgroundColor: Color,
+) {
+    if (track == null && slot != 0) return
+
+    // 轮播落位要求"手指下的那张图"在同一帧变成当前页，不能做 Crossfade。
+    // 以 track.id 重建 CoverArt 的淡入状态：同曲目内的占位图→封面仍会淡入，
+    // 但切到另一首歌时直接以缓存封面起画。
+    key(track?.id) {
+        CoverArt(
+            track = track,
+            artworkRepository = artworkRepository,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = slot * coverSidePx + offsetX.value
+                },
+            cornerRadius = 0.dp,
+            iconSize = 72.dp,
+            trimMargins = true,
+            contentScale = ContentScale.Crop,
+            backgroundColor = backgroundColor,
+        )
     }
 }
 
@@ -562,6 +849,12 @@ private fun AppleMusicProgress(
         animationSpec = tween(160),
         label = "progress-bar-height",
     )
+    // 松手后拖动圆点不是瞬间消失，而是跟着进度条一起收细。
+    val thumbScale by animateFloatAsState(
+        targetValue = if (dragging) 1f else 0f,
+        animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
+        label = "progress-thumb",
+    )
 
     val displayPosition = if (dragging) (dragRatio * durationMs).toLong() else positionMs
 
@@ -616,10 +909,10 @@ private fun AppleMusicProgress(
                 cornerRadius = corner,
             )
 
-            if (dragging) {
+            if (thumbScale > 0f) {
                 drawCircle(
                     color = OnDark,
-                    radius = height * 1.15f,
+                    radius = height * 1.15f * thumbScale,
                     center = Offset(playedWidth, centerY),
                 )
             }
@@ -659,7 +952,18 @@ private fun PlaybackControls(
     ) {
         Spacer(Modifier.size(40.dp))
 
-        IconButton(onClick = onPrevious, modifier = Modifier.size(68.dp)) {
+        // 深色播放页去掉涟漪，改用按压缩放：手指按下时控件轻微收紧，
+        // 松手回弹，比在黑色背景上铺一层水波更干净。
+        Box(
+            modifier = Modifier
+                .size(68.dp)
+                .noRippleClickable(
+                    role = Role.Button,
+                    pressScale = 0.88f,
+                    onClick = onPrevious,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
                 imageVector = Icons.Rounded.SkipPrevious,
                 contentDescription = "上一首",
@@ -672,18 +976,30 @@ private fun PlaybackControls(
             modifier = Modifier
                 .size(84.dp)
                 .clip(CircleShape)
-                .clickable(onClick = onTogglePlay),
+                .noRippleClickable(
+                    role = Role.Button,
+                    pressScale = 0.90f,
+                    onClick = onTogglePlay,
+                ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = if (isPlaying) "暂停" else "播放",
+            AnimatedPlayPauseIcon(
+                isPlaying = isPlaying,
                 tint = OnDark,
-                modifier = Modifier.size(62.dp),
+                iconSize = 62.dp,
             )
         }
 
-        IconButton(onClick = onNext, modifier = Modifier.size(68.dp)) {
+        Box(
+            modifier = Modifier
+                .size(68.dp)
+                .noRippleClickable(
+                    role = Role.Button,
+                    pressScale = 0.88f,
+                    onClick = onNext,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
                 imageVector = Icons.Rounded.SkipNext,
                 contentDescription = "下一首",

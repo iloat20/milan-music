@@ -24,8 +24,8 @@ android {
         applicationId = "com.milan.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 51
-        versionName = "1.0.50"
+        versionCode = 52
+        versionName = "1.0.51"
         vectorDrawables { useSupportLibrary = true }
     }
 

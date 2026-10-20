@@ -1,5 +1,7 @@
 package com.milan.music.ui.components
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -26,6 +28,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
+import com.milan.music.ui.theme.MilanMotion
 
 /**
  * Album artwork with a deterministic gradient fallback. The fallback is derived
@@ -44,14 +47,22 @@ fun CoverArt(
     contentScale: ContentScale = ContentScale.Crop,
     backgroundColor: Color = Color(0x1A1B1713),
 ) {
-    var bitmap by remember(track?.id, trimMargins) {
+    var bitmap by remember(track?.albumId, trimMargins) {
         mutableStateOf(
             // Cache is album-keyed; same-album tracks share one bitmap.
-            if (trimMargins) null else track?.let { artworkRepository.cached(it.albumId) },
+            //
+            // The player cache matters to the cover carousel: both neighbouring
+            // pages are decoded before the swipe, and the one that becomes current
+            // must paint its real cover on the very first frame instead of a
+            // placeholder.
+            track?.let {
+                if (trimMargins) artworkRepository.cachedPlayer(it.albumId)
+                else artworkRepository.cached(it.albumId)
+            },
         )
     }
 
-    LaunchedEffect(track?.id, trimMargins) {
+    LaunchedEffect(track?.albumId, trimMargins) {
         val target = track ?: return@LaunchedEffect
         if (bitmap == null) {
             bitmap = if (trimMargins) {
@@ -82,26 +93,35 @@ fun CoverArt(
             .background(backgroundColor),
         contentAlignment = Alignment.Center,
     ) {
-        if (image != null) {
-            Image(
-                bitmap = image,
-                contentDescription = null,
-                contentScale = contentScale,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(placeholderBrush(track?.id ?: 0L)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.MusicNote,
+        // 占位渐变与真实封面之间做一次短淡入。缓存命中时 target 在同一帧
+        // 就已是新图，Crossfade 不会额外插入一帧占位图。
+        Crossfade(
+            targetState = image,
+            modifier = Modifier.fillMaxSize(),
+            animationSpec = tween(220, easing = MilanMotion.Standard),
+            label = "cover-art",
+        ) { shown ->
+            if (shown != null) {
+                Image(
+                    bitmap = shown,
                     contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.size(iconSize),
+                    contentScale = contentScale,
+                    modifier = Modifier.fillMaxSize(),
                 )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(placeholderBrush(track?.id ?: 0L)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.MusicNote,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.size(iconSize),
+                    )
+                }
             }
         }
     }
