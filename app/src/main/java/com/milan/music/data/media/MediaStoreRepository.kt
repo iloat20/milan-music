@@ -6,6 +6,8 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
+import androidx.annotation.RequiresApi
 import com.milan.music.data.model.Track
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -74,10 +76,18 @@ class MediaStoreRepository(private val context: Context) {
                     )
                 }
             }
-        } catch (_: SecurityException) {
+        } catch (e: SecurityException) {
             // Permission revoked between the check and the query.
-        } catch (_: IllegalArgumentException) {
-            // Some OEM providers reject the projection; return what we have.
+            Log.w(TAG, "audio query rejected: permission revoked", e)
+        } catch (e: Exception) {
+            // The cursor runs against a remote provider, and OEM implementations throw
+            // more than the two cases that used to be listed here:
+            // IllegalArgumentException for a rejected projection, SQLiteException for a
+            // corrupted or rebuilding index, DeadObjectException when MediaProvider is
+            // restarted mid-cursor. None of them is actionable at this level and none
+            // should reach the caller as a crash on the launch path — the caller treats
+            // an empty result as "index unavailable" and keeps the cached snapshot.
+            Log.w(TAG, "audio query failed; returning what was read", e)
         }
         tracks
     }
@@ -131,7 +141,7 @@ class MediaStoreRepository(private val context: Context) {
      */
     private fun generationOrNull(): Long? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        for (volume in VOLUME_CANDIDATES) {
+        for (volume in volumeCandidates()) {
             runCatching { MediaStore.getGeneration(context, volume) }
                 .getOrNull()
                 ?.let { return it }
@@ -149,9 +159,20 @@ class MediaStoreRepository(private val context: Context) {
         if (index >= 0 && !isNull(index)) getInt(index) else 0
 
     companion object {
+        private const val TAG = "MediaStoreRepo"
         private const val MIN_DURATION_MS = 60_000L
 
-        private val VOLUME_CANDIDATES = listOf(
+        /**
+         * Volume names probed for a generation counter, in a fixed order so that
+         * repeated reads always hit the same counter.
+         *
+         * `VOLUME_EXTERNAL` and `VOLUME_EXTERNAL_PRIMARY` are API 29 constants while the
+         * only caller runs on API 30+. The annotation states that contract directly;
+         * without it lint re-derives the API level from the `Build.VERSION` check one
+         * frame up and reports both fields as `InlinedApi` warnings.
+         */
+        @RequiresApi(Build.VERSION_CODES.Q)
+        private fun volumeCandidates(): List<String> = listOf(
             MediaStore.VOLUME_EXTERNAL,
             MediaStore.VOLUME_EXTERNAL_PRIMARY,
         )

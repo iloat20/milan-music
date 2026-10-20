@@ -24,8 +24,8 @@ android {
         applicationId = "com.milan.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 52
-        versionName = "1.0.51"
+        versionCode = 53
+        versionName = "1.0.52"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -85,6 +85,16 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+
+    lint {
+        // arm64-v8a is the only shipped ABI, and that is a deliberate, audited decision:
+        // the app has no native code of its own, the release artifact is verified
+        // against a single ABI, and ChromeOS is not a target. `ChromeOsAbiSupport`
+        // cannot do anything but restate the trade-off this module already documents in
+        // the ndk block, so it is switched off by id rather than left as noise that
+        // hides a real warning later.
+        disable += "ChromeOsAbiSupport"
     }
 }
 

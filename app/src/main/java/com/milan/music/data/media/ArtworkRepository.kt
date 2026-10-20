@@ -100,7 +100,16 @@ class ArtworkRepository(private val context: Context) {
         cache.get(track.albumId)?.let { return it.asImageBitmap() }
 
         val own = CompletableDeferred<ImageBitmap?>()
-        pending.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
+        pending.putIfAbsent(track.albumId, own)?.let { inFlight ->
+            // A producer cancelled mid-decode completes its deferred with `null`, and
+            // its `finally` has already removed the map entry: awaiting alone would
+            // then report "no artwork" for a row that simply scrolled out of
+            // composition, and this row never retries (its LaunchedEffect keys did not
+            // change). Re-reading the cache covers the producer that finished the
+            // decode after the caller was cancelled. Same reasoning as
+            // [loadPlayerArtwork].
+            return inFlight.await() ?: cache.get(track.albumId)?.asImageBitmap()
+        }
 
         var result: ImageBitmap? = null
         try {
@@ -165,7 +174,11 @@ class ArtworkRepository(private val context: Context) {
         backdropCache.get(track.albumId)?.let { return it.asImageBitmap() }
 
         val own = CompletableDeferred<ImageBitmap?>()
-        pendingBackdrop.putIfAbsent(track.albumId, own)?.let { inFlight -> return inFlight.await() }
+        pendingBackdrop.putIfAbsent(track.albumId, own)?.let { inFlight ->
+            // See [load]: a cancelled producer answers `null`, so the cache is the
+            // second source of truth before reporting "no backdrop".
+            return inFlight.await() ?: backdropCache.get(track.albumId)?.asImageBitmap()
+        }
 
         var result: ImageBitmap? = null
         try {
@@ -338,6 +351,13 @@ class ArtworkRepository(private val context: Context) {
         // the pixel reads below would abort the coroutine. The copy costs one readback
         // per album (the result is cached) and keeps every later consumer legal too.
         val image = source.softwareCopy()
+        // `softwareCopy()` falls back to the HARDWARE bitmap itself when `copy()`
+        // returns null (memory pressure). Every pixel call below would then throw, and
+        // it would do so inside the caller's NonCancellable block, where nothing in
+        // this file catches it — the exception would reach the recomposer and take the
+        // process down. Untrimmed artwork is the correct degradation: same cover, with
+        // the pale margins left in.
+        if (image.config == Bitmap.Config.HARDWARE) return image
         val width = image.width
         val height = image.height
         if (width < 32 || height < 32) return image
@@ -400,8 +420,8 @@ class ArtworkRepository(private val context: Context) {
     private fun Bitmap.softwareCopy(): Bitmap =
         if (config == Bitmap.Config.HARDWARE) {
             copy(Bitmap.Config.ARGB_8888, false) ?: run {
-                // Returning the hardware bitmap keeps the caller alive but fails later
-                // at `getPixels()` with an exception that points at the wrong frame.
+                // Returning the hardware bitmap keeps the caller alive; `trimLightMargins`
+                // checks for that case and skips the trim instead of reading pixels.
                 Log.w(TAG, "software copy of a HARDWARE bitmap failed; trim skipped")
                 this
             }

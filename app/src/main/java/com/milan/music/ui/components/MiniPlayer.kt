@@ -67,11 +67,12 @@ fun MiniPlayer(
                 .padding(start = 9.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 46dp 封面配 8.8dp 圆角（≈19%），与列表 52dp/10dp 同一弧度比例。
             CoverArt(
                 track = track,
                 artworkRepository = artworkRepository,
                 modifier = Modifier.size(46.dp),
-                cornerRadius = 5.dp,
+                cornerRadius = 8.8.dp,
                 iconSize = 18.dp,
             )
 

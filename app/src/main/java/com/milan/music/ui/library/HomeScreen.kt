@@ -10,8 +10,10 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -29,6 +31,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -78,6 +81,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
@@ -86,13 +90,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.milan.music.R
 import com.milan.music.data.model.SortMode
 import com.milan.music.data.model.Track
 import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.MiniPlayer
 import com.milan.music.ui.glass.GlassSurface
 import com.milan.music.ui.theme.LocalGlassColors
+import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.theme.MilanMotion
+import com.milan.music.ui.theme.Moonlight
 import com.milan.music.ui.util.noRippleCombinedClickable
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -184,6 +191,12 @@ fun HomeScreen(
     val hazeState = rememberHazeState()
     var mainTab by rememberSaveable { mutableIntStateOf(0) }
     var sortMenuOpen by remember { mutableStateOf(false) }
+
+    // 排序浮层是一层盖住整页的遮罩，系统返回键必须先把浮层收起来。
+    // 没有这个处理时，菜单打开状态下按返回键会直接结束 Activity——用户丢掉的是
+    // 整个界面，而不是他们刚打开的菜单。enabled 绑定可见状态，浮层不可见时返回键
+    // 行为完全交还给系统。
+    BackHandler(enabled = sortMenuOpen) { sortMenuOpen = false }
 
     val favoriteIds = remember(state.favorites) { state.favorites.map { it.id }.toSet() }
     val contentPadding = PaddingValues(
@@ -334,7 +347,15 @@ fun HomeScreen(
             }
             GlassBottomBar(
                 selected = mainTab,
-                onSelect = { mainTab = it },
+                onSelect = { tab ->
+                    // 搜索框只属于曲库页，切走时它会收起来。查询若继续生效，「喜欢」
+                    // 列表就会被一个屏幕上看不见的条件过滤——用户只看到歌变少了，却
+                    // 没有任何入口能发现原因，也无从清除它。
+                    if (tab != mainTab) {
+                        mainTab = tab
+                        viewModel.setQuery("")
+                    }
+                },
                 onRescan = {
                     viewModel.refresh()
                     Toast.makeText(context, "正在重新扫描曲库", Toast.LENGTH_SHORT).show()
@@ -520,7 +541,27 @@ private fun SortMenuOverlay(
     }
 }
 
-private data class BottomTab(val icon: ImageVector, val label: String)
+/**
+ * 一个 tab 的图标来源。
+ *
+ * 米兰 tab 用自带黑白的太极位图（不能 tint，否则两半会变成同一个颜色），
+ * 喜欢 tab 仍是 material 线条图标，靠 tint 跟随取色档。
+ */
+private sealed interface TabIcon {
+    data class Vector(val image: ImageVector) : TabIcon
+
+    /** 已经自带颜色的位图，不 tint；选中态只用 alpha 区分。 */
+    data class Plain(@DrawableRes val res: Int) : TabIcon
+}
+
+private data class BottomTab(
+    val icon: TabIcon,
+    val label: String,
+    val accent: TabAccent,
+)
+
+/** 选中态的取色档：红（[LikedRed]，与列表里的收藏红同一枚）或墨色（浅色纯黑 / 深色 Moonlight）。 */
+private enum class TabAccent { Liked, Ink }
 
 @Composable
 private fun GlassBottomBar(
@@ -529,10 +570,19 @@ private fun GlassBottomBar(
     onRescan: () -> Unit,
     hazeState: HazeState,
 ) {
+    // 纯黑在 Night 上只有 1.05:1、等于隐形，所以墨色档在深色主题里换成 Moonlight。
+    val inkAccent = if (LocalGlassColors.current.isDark) Moonlight else Color.Black
+
     val tabs = remember {
         listOf(
-            BottomTab(Icons.Rounded.LibraryMusic, "曲库"),
-            BottomTab(Icons.Rounded.Favorite, "喜欢"),
+            // 应用图标的太极，已裁掉外圈描边并补成黑白两半（drawable-night 里反相），
+            // 22dp 框内不额外缩放。
+            BottomTab(
+                icon = TabIcon.Plain(R.drawable.ic_tab_taiji),
+                label = "米兰",
+                accent = TabAccent.Ink,
+            ),
+            BottomTab(TabIcon.Vector(Icons.Rounded.Favorite), "喜欢", TabAccent.Liked),
         )
     }
 
@@ -552,7 +602,11 @@ private fun GlassBottomBar(
                 val active = selected == index
                 val tint by animateColorAsState(
                     targetValue = if (active) {
-                        MaterialTheme.colorScheme.primary
+                        when (tab.accent) {
+                            // 「米兰」tab 图标与文字都是黑色，「喜欢」tab 是收藏红（与列表心形同一枚红）。
+                            TabAccent.Ink -> inkAccent
+                            TabAccent.Liked -> LikedRed
+                        }
                     } else {
                         MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
                     },
@@ -576,17 +630,28 @@ private fun GlassBottomBar(
                         .padding(horizontal = 30.dp, vertical = 3.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Icon(
-                        imageVector = tab.icon,
-                        contentDescription = tab.label,
-                        tint = tint,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .graphicsLayer {
-                                scaleX = iconScale
-                                scaleY = iconScale
-                            },
-                    )
+                    val iconModifier = Modifier
+                        .size(22.dp)
+                        .graphicsLayer {
+                            scaleX = iconScale
+                            scaleY = iconScale
+                        }
+
+                    when (val icon = tab.icon) {
+                        is TabIcon.Vector -> Icon(
+                            imageVector = icon.image,
+                            contentDescription = tab.label,
+                            tint = tint,
+                            modifier = iconModifier,
+                        )
+
+                        is TabIcon.Plain -> Image(
+                            painter = painterResource(icon.res),
+                            contentDescription = tab.label,
+                            alpha = if (active) 1f else 0.55f,
+                            modifier = iconModifier,
+                        )
+                    }
                     Spacer(Modifier.height(3.dp))
                     Text(
                         text = tab.label,

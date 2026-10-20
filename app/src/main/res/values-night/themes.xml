@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式的 Theme.MilanMusic，与 values/themes.xml 一一对应。
+
+         基础主题把 windowBackground 固定成白色、windowLightStatusBar 固定为 true。
+         Compose 会在第一帧画出自己的背景，但系统在那一帧之前显示的是窗口背景，
+         所以深色模式下冷启动会先闪一帧白屏；浅色状态栏图标也和深色页面矛盾（直到
+         MainActivity 的 enableEdgeToEdge() 在运行时重新设置才纠正）。
+         #141009 与 ui/theme/Color.kt 的 Night 同值，避免启动帧与首帧之间有跳色。 -->
+    <style name="Theme.MilanMusic" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#FF141009</item>
+    </style>
+</resources>

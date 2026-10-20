@@ -48,7 +48,6 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -586,12 +585,19 @@ fun PlayerScreen(
                         )
                     }
                 }
-                IconButton(
-                    onClick = {
-                        val id = track?.id ?: return@IconButton
-                        scope.launch { container.userData.toggleFavorite(id) }
-                    },
-                    modifier = Modifier.size(44.dp),
+                // 与列表里的收藏按钮保持一致：不用 IconButton，
+                // 避免按压时在封面上铺出一块圆形底色。
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .noRippleClickable(
+                            role = Role.Button,
+                            onClick = {
+                                val id = track?.id ?: return@noRippleClickable
+                                scope.launch { container.userData.toggleFavorite(id) }
+                            },
+                        ),
+                    contentAlignment = Alignment.Center,
                 ) {
                     AnimatedContent(
                         targetState = isFavorite,

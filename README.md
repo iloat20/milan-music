@@ -103,6 +103,7 @@ app/src/main/java/com/milan/music/
 
 | 文件 | 内容 |
 |---|---|
+| `2026-10-20-release-1.0.52.md` | 1.0.52 发布说明：曲库改名米兰、tab 图标换成应用太极（去描边 + 黑白两半）、喜欢 tab 改收藏红；切 tab 清空查询；封面 in-flight 取消、HARDWARE 位图、MediaStore 异常与深色启动白屏四项稳定性修复 |
 | `2026-10-18-app-review.md` | 首次全量审查（P0–P3 共 60+ 项） |
 | `2026-10-19-batch-a-fixes.md` ~ `batch-e-lint-zero.md` | 五批修复与 lint 清零的执行记录 |
 | `2026-10-19-batch-f-tech-refresh.md` | 音频卸载启用、小组件圆角跨版本修复，及其实测待验证清单 |

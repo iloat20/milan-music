@@ -32,7 +32,6 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -87,11 +86,12 @@ fun TrackRow(
             .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 52dp 封面配 10dp 圆角（≈19%），与迷你播放器 46dp/8.8dp 保持同一弧度比例。
         CoverArt(
             track = track,
             artworkRepository = artworkRepository,
             modifier = Modifier.size(52.dp),
-            cornerRadius = 5.dp,
+            cornerRadius = 10.dp,
         )
 
         Spacer(Modifier.width(12.dp))
@@ -123,13 +123,12 @@ fun TrackRow(
 
         // 收藏按钮不使用 IconButton：它的涟漪会在按压时铺出一块圆形底色，
         // 在列表里非常突兀。这里只保留图标本身的切换动画作为反馈，
-        // 同时用 minimumInteractiveComponentSize 维持 48dp 的触摸目标。
+        // 48dp 的命中区域与 Material 的最小触摸目标一致。
         Box(
             modifier = Modifier
-                .minimumInteractiveComponentSize()
+                .size(48.dp)
                 .noRippleClickable(
                     role = Role.Button,
-                    onClickLabel = if (isFavorite) "取消喜欢" else "喜欢",
                     onClick = onToggleFavorite,
                 ),
             contentAlignment = Alignment.Center,
