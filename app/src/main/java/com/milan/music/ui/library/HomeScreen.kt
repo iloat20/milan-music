@@ -66,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -573,6 +574,15 @@ private fun GlassBottomBar(
     // 纯黑在 Night 上只有 1.05:1、等于隐形，所以墨色档在深色主题里换成 Moonlight。
     val inkAccent = if (LocalGlassColors.current.isDark) Moonlight else Color.Black
 
+    // 米兰 tab 的太极每点一次原地转半圈。存的是累积角度而不是布尔值，
+    // 所以连点会一圈圈接着转，不会在中途"掉头"回到原位。
+    var spinTarget by remember { mutableFloatStateOf(0f) }
+    val spin by animateFloatAsState(
+        targetValue = spinTarget,
+        animationSpec = tween(MilanMotion.SlowMs, easing = MilanMotion.Standard),
+        label = "tab-taiji-spin",
+    )
+
     val tabs = remember {
         listOf(
             // 应用图标的太极，已裁掉外圈描边并补成黑白两半（drawable-night 里反相），
@@ -624,7 +634,10 @@ private fun GlassBottomBar(
                         .noRippleCombinedClickable(
                             role = Role.Tab,
                             pressScale = 0.94f,
-                            onClick = { onSelect(index) },
+                            onClick = {
+                                if (index == 0) spinTarget += 180f
+                                onSelect(index)
+                            },
                             onLongClick = if (index == 0) onRescan else null,
                         )
                         .padding(horizontal = 30.dp, vertical = 3.dp),
@@ -635,6 +648,8 @@ private fun GlassBottomBar(
                         .graphicsLayer {
                             scaleX = iconScale
                             scaleY = iconScale
+                            // 只有米兰的太极转；喜欢的心形保持不动。
+                            rotationZ = if (index == 0) spin else 0f
                         }
 
                     when (val icon = tab.icon) {

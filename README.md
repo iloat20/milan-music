@@ -4,7 +4,7 @@ Android 本地音乐播放器。直接读取设备上的音频文件，**不联�
 
 Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻璃质感。
 
-**[下载最新版本](https://github.com/iloat20/milan-music/releases/latest)** · 签名的 APK 与 AAB 发布在 Releases，不随 git 仓库分发。
+**[下载最新版本](https://github.com/iloat20/milan-music/releases/latest)** · 签名的 APK 发布在 Releases，不随 git 仓库分发。
 
 <img src="screenshots/library.jpg" width="320" alt="曲库界面">
 
@@ -103,6 +103,7 @@ app/src/main/java/com/milan/music/
 
 | 文件 | 内容 |
 |---|---|
+| `2026-10-20-release-1.0.53.md` | 1.0.53 发布说明：修复暂停时点下一首/上一首不自动播放（`resumeIfPaused`，仅换曲分支调用）；米兰 tab 太极点击旋转 180°（累积角度，420 ms） |
 | `2026-10-20-release-1.0.52.md` | 1.0.52 发布说明：曲库改名米兰、tab 图标换成应用太极（去描边 + 黑白两半）、喜欢 tab 改收藏红；切 tab 清空查询；封面 in-flight 取消、HARDWARE 位图、MediaStore 异常与深色启动白屏四项稳定性修复 |
 | `2026-10-18-app-review.md` | 首次全量审查（P0–P3 共 60+ 项） |
 | `2026-10-19-batch-a-fixes.md` ~ `batch-e-lint-zero.md` | 五批修复与 lint 清零的执行记录 |

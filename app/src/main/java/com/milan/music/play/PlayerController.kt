@@ -273,19 +273,22 @@ class PlayerController(
 
     fun next() {
         val mediaController = controller ?: return
-        if (mediaController.hasNextMediaItem()) {
-            mediaController.seekToNextMediaItem()
-        } else if (mediaController.mediaItemCount > 0) {
-            mediaController.seekTo(0, 0L)
+        when {
+            mediaController.hasNextMediaItem() -> mediaController.seekToNextMediaItem()
+            mediaController.mediaItemCount > 0 -> mediaController.seekTo(0, 0L)
+            else -> return
         }
+        resumeIfPaused(mediaController)
     }
 
     fun previous() {
         val mediaController = controller ?: return
         if (mediaController.currentPosition > RESUME_POSITION_MS) {
+            // 只是回到当前曲的开头，不是换曲意图，播放状态保持原样。
             mediaController.seekTo(0L)
         } else if (mediaController.hasPreviousMediaItem()) {
             mediaController.seekToPreviousMediaItem()
+            resumeIfPaused(mediaController)
         } else {
             mediaController.seekTo(0L)
         }
@@ -305,6 +308,23 @@ class PlayerController(
         } else {
             mediaController.seekTo(0L)
         }
+        resumeIfPaused(mediaController)
+    }
+
+    /**
+     * 「换曲即播」：暂停时点下一首，会话只会把队列指针移过去，`playWhenReady` 仍是
+     * false，表现就是"点了没反应"。
+     *
+     * 只在真正换曲的分支调用；[previous] 的 3 秒重播、以及队列到头的 `seekTo(0)`
+     * 都不动播放状态，因为那不是换曲意图。判断用 `playWhenReady` 而不是
+     * `isPlaying`：缓冲期间 `isPlaying` 也会是 false，那样会重复发 `play()`。
+     */
+    private fun resumeIfPaused(mediaController: MediaController) {
+        if (mediaController.playWhenReady) return
+        if (mediaController.playbackState == Player.STATE_IDLE) {
+            mediaController.prepare()
+        }
+        mediaController.play()
     }
 
     fun seekTo(positionMs: Long) {
