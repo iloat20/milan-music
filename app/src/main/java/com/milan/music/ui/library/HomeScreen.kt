@@ -227,8 +227,15 @@ fun HomeScreen(
         container.player.playQueue(list, index)
     }
 
-    // Start playing as soon as the library is ready, but only once per screen
-    // instance: returning from the player must not restart playback.
+    // 启动即播：曲库一就绪就开播，起点随机、顺序也打乱（[PlayerController.playQueue]
+    // 里把 shuffleModeEnabled 钉成 true）。这是产品意图——打开应用就开始放音乐，
+    // 不是"用户点了才响"。
+    //
+    // `autoStarted` 用 rememberSaveable：进程没死时（配置变更、从播放页返回）不重播，
+    // 进程重建才重播，符合"打开应用就开始放"的直觉。
+    //
+    // 代价不在这一页：控制器是 bound client，一旦绑定，播放服务就随**进程**存活而不是
+    // 随 UI，`PlayerController.onUiStopped` 的 release 分支因此走不到。那段 KDoc 里有账。
     var autoStarted by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(hasAudioPermission, state.tracks.isNotEmpty()) {
         if (!hasAudioPermission || state.tracks.isEmpty() || autoStarted) return@LaunchedEffect

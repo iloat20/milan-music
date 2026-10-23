@@ -223,18 +223,25 @@ class PlayerController(
      *
      * A [MediaController] is a *bound client*, and Android keeps a service alive as
      * long as any client stays bound — media3's own `stopSelf()` (in
-     * `MediaSessionService.onTaskRemoved`) cannot destroy it on its own. Without
-     * this hook the binding was never dropped: `release()` had no caller at all, so
-     * a session created at cold start lived until the process died.
-     *
-     * Releasing is only safe when there is nothing to lose, i.e. no queue: the user
-     * opened the app, browsed the library and left without playing. That drops the
-     * binding, the bind-only service is destroyed, and the [androidx.media3.exoplayer.ExoPlayer]
-     * it owns goes with it.
+     * `MediaSessionService.onTaskRemoved`) cannot destroy it on its own.
      *
      * With a queue loaded the binding stays on purpose: the session state lives in
      * the service, so releasing the client would also throw away a paused queue and
      * the notification's resume path.
+     *
+     * That is the normal case, not the exception. [com.milan.music.ui.library.HomeScreen]
+     * starts playback as soon as the library loads, so `queueSize` is non-zero on
+     * essentially every launch that has audio permission, and the service lives for
+     * as long as the process does. That is the price of "opening the app starts the
+     * music", not an oversight — and it is why an earlier comment here, which
+     * described a release path for the ordinary launch, was wrong: the ordinary
+     * launch never reaches this branch.
+     *
+     * The branch below is still correct for what remains: a process that goes to the
+     * background without ever playing (no permission, empty library). It is reached
+     * with `controller == null`, where [release] is already a no-op, so the condition
+     * guards the invariant rather than producing an effect. It stays because the
+     * invariant is what makes [release] safe to call from anywhere later.
      */
     fun onUiStopped() {
         if (_state.value.queueSize == 0) release()

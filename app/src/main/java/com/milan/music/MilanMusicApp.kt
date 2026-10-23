@@ -25,13 +25,17 @@ class MilanMusicApp : Application() {
         // 这个开关只影响之后挂载的节点，放在 Application 里是唯一不会晚的位置。
         HazeFeatureFlags.isPlatformBackdropEnabled = true
 
-        // The media session is bound on demand, not here. An eager connect at start
-        // created the service, its ExoPlayer and its MediaSession for every launch —
-        // including launches where the user only browses the library — and because a
-        // MediaController is a bound client the service could never be destroyed
-        // again. PlayerController.playQueue() and togglePlayPause() connect and
-        // replay the request through `pendingAction`, which costs one service bind
-        // on the first tap and nothing on any launch that never plays.
+        // The session is not bound here. It is still bound on every launch that has
+        // audio permission — not by this file, but by HomeScreen, which starts
+        // playback as soon as the library is ready (`autoStarted`). That is intended:
+        // opening the app starts the music.
+        //
+        // The bill is the one an eager connect here would have carried. A
+        // MediaController is a bound client, so the service it binds stays alive for
+        // as long as the process does; doing the connect in this method would only
+        // have moved the same cost earlier and added a second connect path next to
+        // PlayerController's `pendingAction`. What that means for teardown is
+        // documented on PlayerController.onUiStopped.
     }
 
     /**
