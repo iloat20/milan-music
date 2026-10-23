@@ -9,6 +9,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.RequiresApi
 import com.milan.music.data.model.Track
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -79,6 +80,18 @@ class MediaStoreRepository(private val context: Context) {
         } catch (e: SecurityException) {
             // Permission revoked between the check and the query.
             Log.w(TAG, "audio query rejected: permission revoked", e)
+        } catch (e: CancellationException) {
+            // Cancellation is not a provider failure, and this catch must never turn it
+            // into one: the caller treats a returned list as a complete snapshot and
+            // writes it to the cache (`LibraryViewModel.scan` → `libraryCache.save`),
+            // so a swallowed cancellation would persist a half-read library that the
+            // next launch then trusts, because it is stamped as current.
+            //
+            // Unreachable today: the block below contains no suspension point, and
+            // coroutine cancellation is only delivered where a coroutine checks for it.
+            // It stays because adding one `suspend` call inside that try is an easy,
+            // innocent-looking edit, and this branch is what keeps it safe.
+            throw e
         } catch (e: Exception) {
             // The cursor runs against a remote provider, and OEM implementations throw
             // more than the two cases that used to be listed here:

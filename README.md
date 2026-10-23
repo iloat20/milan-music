@@ -12,14 +12,30 @@ Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻�
 
 | 模块 | 说明 |
 |---|---|
-| 曲库 | 歌曲 / 专辑 / 艺人 / 文件夹 四个视图；按标题、艺人、专辑、添加时间、时长排序 |
-| 搜索 | 跨歌曲、艺人、专辑的即时过滤 |
-| 收藏 | 单曲喜欢，独立「收藏」页 |
-| 歌单 | 自建歌单 |
-| 播放页 | 全屏覆盖层，下滑手势或返回键关闭；进度拖拽、上一首 / 下一首、播放暂停 |
+| 曲库 | 「米兰」「喜欢」两个页签共用一个列表；按标题、艺人、专辑、添加时间、时长五种方式排序 |
+| 搜索 | 跨歌名、艺人、专辑的即时过滤；两个页签共用同一份查询，切页签不清空 |
+| 收藏 | 单曲喜欢，落在「喜欢」页签；播放页与列表行的心形状态同步 |
+| 播放页 | 全屏覆盖层，下滑手势或返回键关闭；左右滑动封面切歌，进度拖拽、上一首 / 下一首、播放暂停 |
+| 封面与倒影 | 封面下方按同一张位图逐行镜像生成倒影，模糊半径随距离阶梯递增；无内嵌封面的曲目降级为纯色场，不留上一首的图 |
 | 后台播放 | Media3 `MediaSessionService`，通知栏 / 锁屏 / 蓝牙控制，封面同步 |
 | 桌面小组件 | 2×2 卡片，显示封面与曲名，可直接播放暂停；封面圆角在 Android 8–11 上同样生效 |
 | 主题图标 | Android 13+ 自适应图标的 monochrome 层 |
+
+## 权限
+
+只申请本地播放必需的权限。成品 APK 的实测清单（`aapt2 dump permissions`）：
+
+```
+READ_MEDIA_AUDIO
+READ_EXTERNAL_STORAGE            (maxSdkVersion=32)
+POST_NOTIFICATIONS
+FOREGROUND_SERVICE
+FOREGROUND_SERVICE_MEDIA_PLAYBACK
+WAKE_LOCK
+```
+
+Media3 会传递引入 `INTERNET` 与 `ACCESS_NETWORK_STATE`，清单里用 `tools:node="remove"` 显式移除，
+所以包里没有任何网络权限——这一行同样是护栏：谁删掉它，权限就会漏进成品。
 
 ## 技术栈
 
@@ -27,13 +43,13 @@ Jetpack Compose + Media3 全量重写，暖白底色配淡金描边的水墨玻�
 |---|---|
 | UI | Jetpack Compose（BOM 2026.09.00）、Material 3 |
 | 播放 | Media3 1.11.1（ExoPlayer + MediaSession，音频卸载**关闭**；优先 Android 17 进程内软解，gapless 由 PCM 路径按 encoder delay/padding 裁剪） |
-| 模糊 / 玻璃 | Haze 2.0.1 |
+| 模糊 / 玻璃 | Haze 2.0.1（只用 `haze-glass`；`haze-blur` 已移除，本项目不需要额外的模糊层） |
 | 持久化 | DataStore Preferences + kotlinx.serialization |
 | 音乐库 | MediaStore 查询 + 磁盘缓存 |
-| 构建 | AGP 9.1.1、Kotlin 2.4.20、Gradle 9.3.1、JDK 17 |
+| 构建 | AGP 9.4.1、Kotlin 2.4.21、Gradle 9.8.2、JDK 17 |
 | 平台 | minSdk 26 / targetSdk 37 / compileSdk 37 |
 
-26 个 Kotlin 文件，约 3.7k 行。
+主代码 40 个 Kotlin 文件、约 8.2k 行；`src/test` 10 个文件、87 个用例。
 
 ## 构建
 
@@ -74,28 +90,32 @@ app/src/main/java/com/milan/music/
 ├── MilanMusicApp.kt         Application，装配 AppContainer
 ├── di/AppContainer.kt       手工依赖注入
 ├── data/
-│   ├── media/               MediaStore 扫描、封面读取、磁盘缓存
-│   ├── model/               Track 等数据模型
+│   ├── media/               MediaStore 扫描、封面读取与缓存、位图预算
+│   ├── model/               Track、SortMode 等数据模型
 │   ├── prefs/               DataStore 设置（排序方式）
-│   └── userdata/            收藏与歌单的本地存储
+│   └── userdata/            收藏的本地存储
 ├── play/                    PlayerController（MediaController 客户端）
-│                            PlaybackService、ArtworkBitmapLoader
+│                            PlaybackService、ArtworkBitmapLoader、解码器选择
 ├── ui/
-│   ├── library/             曲库首页、各视图列表、ViewModel
-│   ├── player/              播放页
-│   ├── components/          封面、列表行、迷你播放器
+│   ├── library/             曲库首页、歌曲/喜欢列表、LibraryViewModel
+│   ├── player/              播放页、PlayerViewModel、PlayerArtwork
+│   │                        封面轮播、取色、倒影几何
+│   ├── components/          封面、列表行、迷你播放器、自绘图标
 │   ├── glass/               Haze 玻璃材质封装
-│   └── theme/               配色、字体、主题
+│   ├── util/                交互修饰符与格式化
+│   └── theme/               配色、字体、动效、主题
 └── widget/                  桌面小组件
 ```
 
 播放页是**覆盖层**而非导航目的地：`HomeScreen` 始终保留在 Compose 树中，下滑关闭时能直接露出下层页面（Navigation-Compose 的 pop 过渡做不到这一点）。
 
+播放页不持有依赖容器：`PlayerScreen(PlayerViewModel, PlayerController, ArtworkRepository, onBack)`。控制器与仓库只喂给封面轮播——轮播要等播放会话确认换曲才肯翻页，把这部分状态抄进 ViewModel 会让同一份事实在两处各自演化。
+
 ## 已知问题
 
 - **暂停态从最近任务划掉卡片后服务仍存活**：有队列时主动保留绑定以便重开续播，属产品取舍。
-- **Compose 内约 20 处中文硬编码**：暂无多语言计划。
-- **无自动化测试**：`src/test` 与 `src/androidTest` 均为空。行为验证目前依赖真机冒烟。
+- **界面文案写在 Compose 里**，未走 `strings.xml`：暂无多语言计划。
+- **只有 JVM 单测，没有 `androidTest`**：`src/test` 覆盖封面几何、取色、缓存预算、倒影阶梯、图标墨色与封面归属共 87 例。布局与手势仍需真机冒烟——第 55 批（叠层照实报高，把信息区全部挤出屏幕）和第 57 批（倒影内容错位，看起来像封面出现了两次）都属于只有 UI 测试才抓得住的那一类。
 
 ## 审查与迭代记录
 
@@ -103,6 +123,14 @@ app/src/main/java/com/milan/music/
 
 | 文件 | 内容 |
 |---|---|
+| `2026-10-23-release-1.0.61.md` | 1.0.61 发布说明：播放页改由 `PlayerViewModel` 承载、封面像素按曲目作废；并入 1.0.54~1.0.59 的倒影带子重做 |
+| `2026-10-23-code-review.md` | 全量代码审查：P0 四项、P1 七项，含依赖方向现状与目标架构、逐条「不建议做」的理由 |
+| `2026-10-23-b59-no-flash.md` | 带子与翻页同帧：切歌不再闪一下；附「缓存切片装不下一张位图，该缓存从未生效」的取证 |
+| `2026-10-23-b58-band-rides-cover.md` | 倒影叠层跟随封面横移：叠层与轮播读同一个位移，钉在屏幕上就会和封面脱开 |
+| `2026-10-23-b57-exact-mirror.md` | 「封面出现两次」的根因：`Image(contentScale, alignment)` 的定位依赖「缩放后高度 == 框高」，倒影节点高度不等，于是整体滑动 |
+| `2026-10-22-liquid-glass-measured-gap.md` | 玻璃折射的可见度与背景高频的关系：均匀背景上物理上就看不见 |
+| `2026-10-22-glass-body.md` | 奶白体改成乘性薄幕：压 tint 无效，主项在 `whitePoint` 与 `contrast` |
+| `2026-10-21-liquid-glass-t2.md` | 玻璃边缘三路归零（specular / ambient / edge shadow）的实测对比 |
 | `2026-10-20-release-1.0.53.md` | 1.0.53 发布说明：修复暂停时点下一首/上一首不自动播放（`resumeIfPaused`，仅换曲分支调用）；米兰 tab 太极点击旋转 180°（累积角度，420 ms） |
 | `2026-10-20-release-1.0.52.md` | 1.0.52 发布说明：曲库改名米兰、tab 图标换成应用太极（去描边 + 黑白两半）、喜欢 tab 改收藏红；切 tab 清空查询；封面 in-flight 取消、HARDWARE 位图、MediaStore 异常与深色启动白屏四项稳定性修复 |
 | `2026-10-18-app-review.md` | 首次全量审查（P0–P3 共 60+ 项） |
