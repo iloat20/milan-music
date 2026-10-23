@@ -11,6 +11,7 @@ import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.scale
 import androidx.core.net.toUri
@@ -21,6 +22,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Loads embedded album artwork.
@@ -48,10 +50,10 @@ class ArtworkRepository(private val context: Context) {
      * Total bitmap budget, shared with the notification loader. See [BitmapBudget]
      * for why it is derived from the heap rather than hard-coded.
      *
-     * Slices below sum to 14/16: list 8, player 2, backdrop 1, notification 3. The
-     * remaining 2/16 is deliberate headroom: decoding a cover holds the source and
-     * the scaled result at the same time, and that transient allocation lives outside
-     * every cache, so it must not be counted against them.
+     * Slices below sum to 14.5/16: list 8, player 2, backdrop 1, reflection 0.5,
+     * notification 3. The remaining 1.5/16 is deliberate headroom: decoding a cover
+     * holds the source and the scaled result at the same time, and that transient
+     * allocation lives outside every cache, so it must not be counted against them.
      */
     private val budget = BitmapBudget.totalBytes(context)
 
@@ -72,10 +74,15 @@ class ArtworkRepository(private val context: Context) {
     }
 
     /**
-     * Trimmed player-screen artwork, keyed by albumId. Few albums are viewed at
-     * once, so this earns the smallest slice that still spans a track change.
+     * Trimmed player-screen artwork, keyed by albumId.
+     *
+     * The carousel keeps three pages composed at once (previous / current / next), and
+     * the one that becomes current re-reads the cache on the frame it is re-composed —
+     * a miss there paints the placeholder gradient before the cover, which reads as a
+     * flash on every switch. A 512 px cover is ~1 MB, so `2/16` of a 24 MB budget held
+     * exactly three and any eviction broke that guarantee; `3/16` leaves one spare.
      */
-    private val playerCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 2, 16)) {
+    private val playerCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 3, 16)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -91,10 +98,27 @@ class ArtworkRepository(private val context: Context) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
+    /**
+     * Vertically flipped covers, keyed by albumId. The player draws one under the
+     * cover as its reflection.
+     *
+     * **The slice has to exceed one bitmap or this cache holds nothing.** [LruCache]
+     * evicts on insert while `size > maxSize`, so a single entry larger than the cap
+     * evicts itself and the next caller pays a full decode-and-flip again. At `1/32` of
+     * a 24 MB budget the cap was 768 KB against a ~1 MB 512 px reflection: the cache
+     * was a no-op on every device, and every track change re-ran the flip.
+     * [REFLECTION_LEGACY_SIZE] on API 30 and below is a few KB, so this slice holds
+     * plenty there (see [reflectionOf]).
+     */
+    private val reflectionCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 2, 32)) {
+        override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
+    }
+
     /** De-duplicates concurrent requests for the same album while scrolling fast. */
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
     private val pendingPlayer = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
     private val pendingBackdrop = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
+    private val pendingReflection = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
 
     suspend fun load(track: Track): ImageBitmap? {
         cache.get(track.albumId)?.let { return it.asImageBitmap() }
@@ -192,6 +216,51 @@ class ArtworkRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Vertically flipped cover, for the player's reflection band under the artwork.
+     *
+     * Sourced from [loadPlayerArtwork] rather than [loadBackdrop]: the reflection has to
+     * stay **recognisable as the cover**, and a 96 px thumbnail scaled to half a screen
+     * is 11x — no blur radius leaves a pattern in it. The player cover is already
+     * decoded and cached, so this costs a flip and no extra MediaProvider round trip.
+     *
+     * The flip works on pixels rather than a `Matrix` so [reflectRows] stays a plain
+     * function that unit tests can drive without a device.
+     */
+    suspend fun loadReflection(track: Track): ImageBitmap? {
+        reflectionCache.get(track.albumId)?.let { return it.asImageBitmap() }
+
+        val own = CompletableDeferred<ImageBitmap?>()
+        pendingReflection.putIfAbsent(track.albumId, own)?.let { inFlight ->
+            // Same cancellation caveat as [load]: a producer cancelled mid-decode
+            // answers `null`, so re-read the cache before reporting "no reflection".
+            return inFlight.await() ?: reflectionCache.get(track.albumId)?.asImageBitmap()
+        }
+
+        var result: ImageBitmap? = null
+        try {
+            val source = loadPlayerArtwork(track)
+            // `Modifier.blur` is an API 31 RenderEffect; below that the reflection can
+            // only be softened by its own resolution, so the bitmap is stored tiny.
+            val targetWidth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                REFLECTION_SIZE
+            } else {
+                REFLECTION_LEGACY_SIZE
+            }
+            val flipped = if (source == null) {
+                null
+            } else {
+                withContext(Dispatchers.IO) { reflectionOf(source, targetWidth) }
+            }
+            if (flipped != null) reflectionCache.put(track.albumId, flipped)
+            result = flipped?.asImageBitmap()
+            return result
+        } finally {
+            pendingReflection.remove(track.albumId)
+            own.complete(result)
+        }
+    }
+
     fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
 
     /**
@@ -203,6 +272,10 @@ class ArtworkRepository(private val context: Context) {
      * one-frame placeholder flash.
      */
     fun cachedPlayer(albumId: Long): ImageBitmap? = playerCache.get(albumId)?.asImageBitmap()
+
+    /** The flipped cover already prepared for this album, or `null`. */
+    fun cachedReflection(albumId: Long): ImageBitmap? =
+        reflectionCache.get(albumId)?.asImageBitmap()
 
     /**
      * Releases cached covers when the process is told to shed memory.
@@ -230,6 +303,7 @@ class ArtworkRepository(private val context: Context) {
                 cache.trimToSize(cache.maxSize() / 6)
                 playerCache.evictAll()
                 backdropCache.evictAll()
+                reflectionCache.evictAll()
             }
             // RUNNING_LOW / RUNNING_CRITICAL (API 26-33): still foreground, but the
             // process is under pressure. Shrink hard, never empty them.
@@ -242,6 +316,7 @@ class ArtworkRepository(private val context: Context) {
                 cache.trimToSize(cache.maxSize() / 8)
                 playerCache.trimToSize(playerCache.maxSize() / 8)
                 backdropCache.trimToSize(backdropCache.maxSize() / 8)
+                reflectionCache.trimToSize(reflectionCache.maxSize() / 8)
             }
             // RUNNING_MODERATE: the system is starting to run low while we are still
             // in the foreground. Halving is a cheap first response and costs no
@@ -253,6 +328,7 @@ class ArtworkRepository(private val context: Context) {
                 cache.trimToSize(cache.maxSize() / 2)
                 playerCache.trimToSize(playerCache.maxSize() / 2)
                 backdropCache.trimToSize(backdropCache.maxSize() / 2)
+                reflectionCache.trimToSize(reflectionCache.maxSize() / 2)
             }
         }
     }
@@ -262,6 +338,7 @@ class ArtworkRepository(private val context: Context) {
         cache.evictAll()
         playerCache.evictAll()
         backdropCache.evictAll()
+        reflectionCache.evictAll()
     }
 
     /**
@@ -411,6 +488,42 @@ class ArtworkRepository(private val context: Context) {
     }
 
     /**
+     * [source] scaled down to [targetWidth] and flipped top-to-bottom.
+     *
+     * Returns `null` rather than throwing when the pixels cannot be read: the reflection
+     * is decorative, and this runs inside the caller's `NonCancellable` hand-off, where an
+     * exception would reach the recomposer. `null` degrades to the flat colour field.
+     */
+    private fun reflectionOf(source: ImageBitmap, targetWidth: Int): Bitmap? = runCatching {
+        val software = source.asAndroidBitmap().softwareCopy()
+        if (software.config == Bitmap.Config.HARDWARE) {
+            Log.w(TAG, "reflection skipped: artwork pixels are unavailable (HARDWARE)")
+            return@runCatching null
+        }
+        val scaled = if (software.width > targetWidth) {
+            val ratio = targetWidth.toFloat() / software.width
+            software.scale(
+                targetWidth,
+                (software.height * ratio).roundToInt().coerceAtLeast(1),
+            )
+        } else {
+            software
+        }
+        val width = scaled.width
+        val height = scaled.height
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        Bitmap.createBitmap(
+            reflectRows(pixels, width, height),
+            width,
+            height,
+            Bitmap.Config.ARGB_8888,
+        )
+    }.onFailure {
+        Log.w(TAG, "reflection flip failed for ${source.width}px artwork", it)
+    }.getOrNull()
+
+    /**
      * Returns a bitmap whose pixels are readable from Java.
      *
      * `Bitmap.Config.HARDWARE` (API 26+) keeps pixels in graphics memory: `getPixels`
@@ -443,8 +556,52 @@ class ArtworkRepository(private val context: Context) {
         /** The player renders the cover full-width, so it keeps the larger source. */
         private const val PLAYER_THUMB_SIZE = 512
         private const val BACKDROP_SIZE = 96
+
+        /**
+         * Reflection width where `Modifier.blur` is available (API 31+).
+         *
+         * Matches [PLAYER_THUMB_SIZE]: the reflection is drawn at the same size as the
+         * cover it mirrors, so scaling it down first would only lose detail the 14 dp
+         * blur does not hide.
+         */
+        private const val REFLECTION_SIZE = PLAYER_THUMB_SIZE
+
+        /**
+         * Reflection width on API 26-30, where `Modifier.blur` is a no-op.
+         *
+         * Softness has to come from resolution alone there. 96 px was tried and rejected
+         * on a portrait cover: an 11x upscale still resolves a face clearly, and a
+         * face hanging upside down under the title reads as a rendering bug. 48 px
+         * degrades it to colour patches.
+         */
+        private const val REFLECTION_LEGACY_SIZE = 48
+
         private const val LIGHT_THRESHOLD = 236
         private const val MAX_TRIM_FRACTION = 0.22f
         private const val MIN_KEEP_FRACTION = 0.45f
     }
+}
+
+/**
+ * Flips an ARGB pixel buffer top-to-bottom.
+ *
+ * Pure so unit tests can pin the row order without a `Bitmap`. `System.arraycopy` per
+ * row rather than an element-wise loop: the buffers are 512*512 ints on API 31+, and a
+ * per-pixel Kotlin loop costs noticeably more than a native block copy.
+ */
+internal fun reflectRows(pixels: IntArray, width: Int, height: Int): IntArray {
+    require(width > 0 && height > 0) { "reflection needs a non-empty image" }
+    require(pixels.size >= width * height) { "pixel buffer is smaller than the image" }
+
+    val flipped = IntArray(width * height)
+    for (row in 0 until height) {
+        System.arraycopy(
+            pixels,
+            (height - 1 - row) * width,
+            flipped,
+            row * width,
+            width,
+        )
+    }
+    return flipped
 }

@@ -49,73 +49,65 @@ private val DarkColors = darkColorScheme(
     onError = Color(0xFF601410),
 )
 
+/**
+ * 玻璃材质在主题里的全部可变项 —— 现在只剩「要不要投影」这一条。
+ *
+ * 第 20 批还剩 `tint`，第 21 批也删掉了。原因是实测：`GlassStyle.clear` 的浅色链
+ * 自带 **白点 0.17 + 对比度 0.08**，这两项作用在 L≈0.87 的亮背景上会把整块面板推高
+ * 15 级（背景 238,223,184 → 框内 251,238,203，实测吻合），而我们的 tint 只占其中的
+ * 1.9 级。所以压 tint 一直压不出效果 —— 主项不在我们手里，在库的校准值里。
+ *
+ * 更要紧的是连带伤害：同一条链会把 `edgeShadow` 压出的暗带从 −22 级提亮到 −3。
+ * 暗带消失后，边缘只剩一条孤立亮线，整块面板就读成"描边贴纸"。
+ *
+ * 现在的策略是**不做任何色调偏移**（白点 0、对比度 0、tint 用库默认的 Transparent），
+ * 让面板内部与背景等价、只在边界上留下光学。真实玻璃在均匀介质上本来就不可见，
+ * 可见性全部来自边界 —— 这正是前几批一直缺的那一半。
+ */
 data class GlassColors(
-    val fillTop: Color,
-    val fillBottom: Color,
-    val borderTop: Color,
-    val borderBottom: Color,
-    val sheen: Color,
-    val hairline: Color,
+    /** 深色主题不投影：近黑底上一圈黑影只会把面板压成一块脏斑。 */
     val isDark: Boolean,
 )
 
-val LocalGlassColors = staticCompositionLocalOf {
-    GlassColors(
-        fillTop = GlassLightTop,
-        fillBottom = GlassLightBottom,
-        borderTop = Color(0xE6FFFFFF),
-        borderBottom = Color(0x26FFFFFF),
-        sheen = Sheen,
-        hairline = HairlineGold,
-        isDark = false,
-    )
-}
+/**
+ * 玻璃材质的主题开关。
+ *
+ * 抽成纯函数是为了让 `GlassMaterialTest` 能直接断言**主题里真正生效的那组值**。
+ * 早先测试自己在用例里复制了一份 color/shadow/intensity，改主题不会让测试变红——
+ * 那等于只测了测试自己。
+ */
+internal fun glassColorsFor(darkTheme: Boolean): GlassColors = GlassColors(isDark = darkTheme)
+
+val LocalGlassColors = staticCompositionLocalOf { glassColorsFor(darkTheme = false) }
+
+/**
+ * 墨色前景——图标、选中的 tab、搜索框里的放大镜与排序——的唯一来源。
+ *
+ * 浅色主题给**纯黑**，深色主题给 [Moonlight]。两条理由都不是审美：
+ *
+ *  - 不能退回 `MaterialTheme.colorScheme.onBackground`：它指向 [Ink]（`0xFF2A2419`，
+ *    暖黑），在浅金底上叠一层 alpha 之后读起来是"灰棕"，不是黑。用户对搜索框的
+ *    放大镜与排序图标提过一次「变成纯黑色」，那次前的取值正是 `onBackground @0.62/0.72`。
+ *  - 也不能全用纯黑：[Moonlight] 换成纯黑在夜色背景上只有约 1.05:1，等于隐形。
+ */
+internal fun iconInkFor(darkTheme: Boolean): Color = if (darkTheme) Moonlight else Color.Black
 
 @Composable
 fun MilanTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
-    val glass = if (darkTheme) {
-        GlassColors(
-            fillTop = GlassDarkTop,
-            fillBottom = GlassDarkBottom,
-            borderTop = Color(0x4DFFFFFF),
-            borderBottom = Color(0x0FFFFFFF),
-            sheen = Color(0x1FFFF3D0),
-            hairline = Color(0x33E7CE93),
-            isDark = true,
-        )
-    } else {
-        GlassColors(
-            fillTop = GlassLightTop,
-            fillBottom = GlassLightBottom,
-            borderTop = Color(0xE6FFFFFF),
-            borderBottom = Color(0x26FFFFFF),
-            sheen = Sheen,
-            hairline = HairlineGold,
-            isDark = false,
-        )
-    }
+    val glass = glassColorsFor(darkTheme)
 
-    // Blur input is downsampled for every glass surface at once.
+    // 玻璃此前只做模糊时，`Performance` 是划算的：模糊半径会被同样的系数缩小，
+    // 只是丢掉了模糊前的细节，而 30dp 的模糊本来就留不住细节。
     //
-    // Haze captures each effect's backdrop into an offscreen layer sized
-    // `effectBounds * resolveBlurInputScale(performanceMode)`, then applies the blur
-    // at that resolution. The library default is `Balanced` = `Fixed(0.5f)`, which
-    // resolves to 0.79 linear / 62.5% of the pixels (BlurInputScalePolicy.kt:
-    // sqrt(0.25 + 0.75 * qualityFraction)); `Performance` is the 0.5 linear / 25%
-    // floor and saves ~0.9 MB across the four panels.
-    //
-    // The apparent blur radius is unchanged: Haze scales the radius by the same
-    // factor (BlurVisualEffectUtils.kt `resolveBlurRadiusPx = blurRadius * scale`),
-    // so only pre-blur detail is lost — and 26.dp of blur destroys that detail
-    // anyway. The one visible consequence would be the 0.03 noise grain doubling in
-    // size, since noise is applied before the upscale; if it ever shows, step back
-    // to `Fixed(0.35f)` before giving up the saving entirely.
+    // 换成 `hazeGlass` 之后这个前提不成立了——**折射就是细节本身**。输入被降采样
+    // 一半，边缘那道被压缩的内容环会一起变软，等于把这次要加回来的东西又削掉一截。
+    // 所以回到 `Default`（Balanced），先用文档推荐的档位，等真机测到帧率再说。
     CompositionLocalProvider(
         LocalGlassColors provides glass,
-        LocalHazePerformanceMode provides HazePerformanceMode.Performance,
+        LocalHazePerformanceMode provides HazePerformanceMode.Default,
     ) {
         MaterialTheme(
             colorScheme = if (darkTheme) DarkColors else LightColors,

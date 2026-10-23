@@ -187,7 +187,7 @@ class LibraryViewModel(
 
             // An empty result while a non-empty cache exists almost always means the
             // index was momentarily unavailable; do not wipe the user's library.
-            if (fresh.isEmpty() && cached.isNotEmpty()) {
+            if (keepsCachedLibraryOnEmptyScan(fresh.size, cached.size)) {
                 Log.w(
                     TAG,
                     "rescan returned 0 tracks while ${cached.size} are cached; " +
@@ -230,6 +230,20 @@ class LibraryViewModel(
         // unnoticed.
         val stamp = mediaStore.stamp()
         val tracks = mediaStore.loadTracks()
+        // The explicit-refresh path needs the same guard as [ensureLoaded], and it is
+        // the path that runs when the user already believes something is wrong. A
+        // provider that answers with zero rows while it rebuilds would empty the
+        // library *and* stamp that emptiness as current, so the next launch would
+        // match the stamp and skip the rescan that could have healed it.
+        if (keepsCachedLibraryOnEmptyScan(tracks.size, allTracks.value.size)) {
+            Log.w(
+                TAG,
+                "rescan returned 0 tracks while ${allTracks.value.size} are cached; " +
+                    "keeping the library and forcing a rescan next launch",
+            )
+            loading.value = false
+            return
+        }
         allTracks.value = tracks
         libraryCache.save(tracks, stamp)
         loading.value = false
@@ -263,3 +277,19 @@ class LibraryViewModel(
         }
     }
 }
+
+/**
+ * Whether a scan that returned [freshCount] rows must leave the current library alone.
+ *
+ * MediaProvider answers a query with zero rows while it is restarting, rebuilding its
+ * index, or when the permission check races the read — indistinguishable from an
+ * emptied library at this level. Treating that as "the user has no music" clears the
+ * list *and* stamps the empty snapshot as current, so the next launch matches the
+ * stamp and skips the rescan that could have healed it. Only a genuinely empty
+ * library (nothing cached, nothing returned) may replace what is on screen.
+ *
+ * Kept as a free function so the decision is unit-testable without Android: the
+ * `LibraryViewModel` around it needs DataStore, a ContentResolver and a main looper.
+ */
+internal fun keepsCachedLibraryOnEmptyScan(freshCount: Int, cachedCount: Int): Boolean =
+    freshCount == 0 && cachedCount > 0

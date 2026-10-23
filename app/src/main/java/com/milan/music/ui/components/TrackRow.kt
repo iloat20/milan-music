@@ -6,6 +6,8 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -59,18 +61,8 @@ fun TrackRow(
 ) {
     val highlight = MaterialTheme.colorScheme.primary
 
-    // 当前曲目背景与标题色随播放位置移动渐变，而不是整行瞬间跳色。
-    val rowBackground by animateColorAsState(
-        targetValue = if (isCurrent) {
-            highlight.copy(alpha = 0.10f)
-        } else {
-            // 用同色零透明度而不是 Color.Transparent：插值时只动 alpha，
-            // 不会在中间帧混进黑色。
-            highlight.copy(alpha = 0f)
-        },
-        animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
-        label = "track-row-background",
-    )
+    // 当前曲目只靠标题色与跳动波形标识，整行不再铺 primary 底色：
+    // 列表是多行并排的，一块半透明色带会把行与行切成两截。
     val titleColor by animateColorAsState(
         targetValue = if (isCurrent) highlight else MaterialTheme.colorScheme.onBackground,
         animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
@@ -81,17 +73,17 @@ fun TrackRow(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
-            .background(rowBackground)
             .clickable(onClick = onClick)
             .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 52dp 封面配 10dp 圆角（≈19%），与迷你播放器 46dp/8.8dp 保持同一弧度比例。
+        // 52dp 方图配 4dp 圆角（≈8%），和参考版的列表缩略图同一个形状：
+        // 是"方片带一点倒角"，不是 squircle。弧度值只有一处定义，见 CoverCornerRadius。
         CoverArt(
             track = track,
             artworkRepository = artworkRepository,
             modifier = Modifier.size(52.dp),
-            cornerRadius = 10.dp,
+            cornerRadius = CoverCornerRadius,
         )
 
         Spacer(Modifier.width(12.dp))
@@ -178,7 +170,7 @@ fun PlayingBars(
     modifier: Modifier = Modifier,
     barCount: Int = 3,
 ) {
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "playing-bars")
+    val transition = rememberInfiniteTransition(label = "playing-bars")
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.Bottom,
@@ -188,8 +180,8 @@ fun PlayingBars(
             val scale by transition.animateFloat(
                 initialValue = 0.30f,
                 targetValue = 1f,
-                animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                    animation = androidx.compose.animation.core.tween(
+                animationSpec = infiniteRepeatable(
+                    animation = tween(
                         durationMillis = 380 + index * 110,
                         easing = FastOutSlowInEasing,
                     ),

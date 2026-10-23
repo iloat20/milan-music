@@ -13,9 +13,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.milan.music.di.AppContainer
 import com.milan.music.ui.library.HomeScreen
 import com.milan.music.ui.player.PlayerScreen
+import com.milan.music.ui.player.PlayerViewModel
 import com.milan.music.ui.theme.MilanTheme
 
 /**
@@ -27,6 +29,8 @@ import com.milan.music.ui.theme.MilanTheme
 @Composable
 fun MilanApp(container: AppContainer) {
     var playerOpen by remember { mutableStateOf(false) }
+    // 容器只在这里出现一次：两个 ViewModel 从这里取依赖，UI 组件只收到状态和回调。
+    val playerViewModel: PlayerViewModel = viewModel(factory = PlayerViewModel.factory(container))
 
     MilanTheme {
         Box(Modifier.fillMaxSize()) {
@@ -46,7 +50,10 @@ fun MilanApp(container: AppContainer) {
                 exit = ExitTransition.None,
             ) {
                 PlayerScreen(
-                    container = container,
+                    viewModel = playerViewModel,
+                    // 只有封面轮播需要这两个：它自己加载封面，并等会话确认换曲后落位。
+                    player = container.player,
+                    artwork = container.artwork,
                     onBack = { playerOpen = false },
                 )
             }

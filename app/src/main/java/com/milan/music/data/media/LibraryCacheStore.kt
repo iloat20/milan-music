@@ -75,6 +75,17 @@ private val Context.libraryCacheStore: DataStore<Preferences> by
  * A full MediaStore query costs hundreds of milliseconds on large libraries and
  * makes the first frame wait; showing the cached snapshot immediately and only
  * rescanning on an explicit user action keeps launches instant.
+ *
+ * ## Where this stops scaling
+ *
+ * The rows live as one JSON string inside a Preferences DataStore. That is the right
+ * shape for a cache written once per scan and read once per launch, and it keeps the
+ * build free of Room and KSP. The cost is whole-value granularity: every [save]
+ * re-encodes every row (~1 MB at 5 000 tracks) and DataStore rewrites the file in
+ * full. At this app's write rate — one commit per scan — that is not worth a second
+ * storage engine. If the library ever reaches five figures, move the payload to a
+ * plain file beside the watermark and leave only the stamp in DataStore; the
+ * [Snapshot] boundary means that change stays inside this class.
  */
 class LibraryCacheStore(private val context: Context) {
 

@@ -24,8 +24,8 @@ android {
         applicationId = "com.milan.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 54
-        versionName = "1.0.53"
+        versionCode = 62
+        versionName = "1.0.61"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -125,6 +125,10 @@ dependencies {
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.serialization.json)
+    // haze-glass 自带深度模糊与折射，haze-blur 已经没有调用点了 —— 留着会是一条
+    // 永远不会被走到、却仍要在升级时一起维护的模糊路径。
     implementation(libs.haze)
-    implementation(libs.haze.blur)
+    implementation(libs.haze.glass)
+
+    testImplementation(libs.junit)
 }

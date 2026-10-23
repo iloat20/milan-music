@@ -19,6 +19,12 @@ signing.properties
 dist/*.apk
 dist/*.aab
 dist/*.idsig
+dist/_debug/
+dist/icon-export/
+
+# --- 取证/预览中间图（review 只入库 .md 结论与 .py 生成脚本）---
+review/*.png
+screenshots/*.png
 
 # --- IDE / 系统 ---
 .idea/

@@ -20,13 +20,11 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -52,12 +50,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.LibraryMusic
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,6 +80,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -96,11 +95,14 @@ import com.milan.music.data.model.SortMode
 import com.milan.music.data.model.Track
 import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.MiniPlayer
+import com.milan.music.ui.components.SearchGlyph
+import com.milan.music.ui.components.SortGlyph
 import com.milan.music.ui.glass.GlassSurface
 import com.milan.music.ui.theme.LocalGlassColors
 import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.theme.MilanMotion
-import com.milan.music.ui.theme.Moonlight
+import com.milan.music.ui.theme.homeBackdropFor
+import com.milan.music.ui.theme.iconInkFor
 import com.milan.music.ui.util.noRippleCombinedClickable
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -108,6 +110,14 @@ import dev.chrisbanes.haze.rememberHazeState
 import kotlin.random.Random
 
 private val ContentBottomPadding = 152.dp
+
+/**
+ * 搜索框叠加层要让给列表的高度：12dp 上留白 + 46dp 输入框 + 2dp 下留白 + 6dp 原始留白。
+ *
+ * 这个值只在"列表第一项不该被玻璃压住"时用；滚动之后内容是从搜索框**底下**穿过去的，
+ * 那正是要的效果。
+ */
+private val SearchFieldOverlayHeight = 66.dp
 
 @Composable
 fun HomeScreen(
@@ -200,10 +210,16 @@ fun HomeScreen(
     BackHandler(enabled = sortMenuOpen) { sortMenuOpen = false }
 
     val favoriteIds = remember(state.favorites) { state.favorites.map { it.id }.toSet() }
+
+    // 搜索框浮在列表之上（和底栏同一套逻辑），不再占列表的高度。好处是列表能滚到
+    // 最顶、内容从玻璃底下穿过去——这才是"浮"的观感。代价是列表得自己让出这一条，
+    // 否则第一首歌会被永久压在玻璃底下。
+    //
+    // 搜索框现在两个 tab 都在（2026-10-22），所以这条留白是常量，不再随 tab 动画。
     val contentPadding = PaddingValues(
         start = 12.dp,
         end = 12.dp,
-        top = 6.dp,
+        top = SearchFieldOverlayHeight,
         bottom = ContentBottomPadding,
     )
 
@@ -237,40 +253,6 @@ fun HomeScreen(
                 .fillMaxSize()
                 .statusBarsPadding(),
         ) {
-            // 搜索栏只属于曲库页。切到"喜欢"时让它收高度而不是瞬间消失，
-            // 否则下面的列表会先向上跳一行，再开始自己的过渡。
-            AnimatedVisibility(
-                visible = mainTab == 0,
-                enter = expandVertically(
-                    animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
-                ) + fadeIn(tween(MilanMotion.FastMs)),
-                exit = shrinkVertically(
-                    animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
-                ) + fadeOut(tween(MilanMotion.FastMs)),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SearchField(
-                        value = queryText,
-                        onValueChange = viewModel::setQuery,
-                        hazeState = hazeState,
-                        modifier = Modifier.weight(1f),
-                    )
-
-                    IconButton(onClick = { sortMenuOpen = true }) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.Sort,
-                            contentDescription = "排序",
-                            tint = MaterialTheme.colorScheme.onBackground,
-                        )
-                    }
-                }
-            }
-
             // 曲库/喜欢切换：新列表从下方少许滑入并淡入，旧列表短淡出。
             // 模糊源挂在容器上而不是列表里：曲库、喜欢、以及空的"喜欢"页都
             // 共用这一个 source，切 tab 时不会先把源摘掉再挂上，底部玻璃也就
@@ -290,33 +272,43 @@ fun HomeScreen(
                 contentKey = { it },
                 label = "library-tab",
             ) { tab ->
-                if (tab == 0) {
-                    SongsList(
-                        tracks = state.tracks,
-                        artworkRepository = container.artwork,
-                        currentTrackId = playerState.currentTrack?.id,
-                        isPlaying = playerState.isPlaying,
-                        favoriteIds = favoriteIds,
-                        onPlay = playList,
-                        onToggleFavorite = viewModel::toggleFavorite,
-                        contentPadding = contentPadding,
-                        isLoading = state.loading,
-                    )
-                } else {
-                    SongsList(
-                        tracks = state.favorites,
-                        artworkRepository = container.artwork,
-                        currentTrackId = playerState.currentTrack?.id,
-                        isPlaying = playerState.isPlaying,
-                        favoriteIds = favoriteIds,
-                        onPlay = playList,
-                        onToggleFavorite = viewModel::toggleFavorite,
-                        contentPadding = contentPadding,
-                        isLoading = state.loading,
-                    )
-                }
+                // Both tabs render the same list; only the source differs. One call
+                // site keeps the swipe/empty/loading behaviour from drifting apart.
+                SongsList(
+                    tracks = if (tab == 0) state.tracks else state.favorites,
+                    artworkRepository = container.artwork,
+                    currentTrackId = playerState.currentTrack?.id,
+                    isPlaying = playerState.isPlaying,
+                    favoriteIds = favoriteIds,
+                    onPlay = playList,
+                    onToggleFavorite = viewModel::toggleFavorite,
+                    contentPadding = contentPadding,
+                    isLoading = state.loading,
+                )
             }
         }
+
+        // 搜索框**浮在列表之上**——和底栏同一套做法：不占列表高度，列表滚到顶时
+        // 内容从玻璃底下穿过去。它曾在 Column 里占位，列表永远停在它下面，滚不动
+        // 那一条，观感是"一块贴纸"而不是"浮起的玻璃"。
+        //
+        // 曲库与"喜欢"两页共用同一个搜索框（2026-10-22）：查询条件对两个列表一致
+        // 生效，用户在任何一页都能看见并清除它，所以不再按 tab 收起。
+        //
+        // 排序按钮**在玻璃里面**（2026-10-22 用户要求），搜索框因此铺满整行。左右边距
+        // 一并从 20/12 收成 14/14：那对不对称值原来是为了给框外的按钮留位，按钮进了
+        // 框之后它只剩"左边比右边宽 8dp"这一个效果；14dp 也和迷你播放器、底栏同一条竖线。
+        SearchField(
+            value = queryText,
+            onValueChange = viewModel::setQuery,
+            onSortClick = { sortMenuOpen = true },
+            hazeState = hazeState,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(start = 14.dp, end = 14.dp, top = 12.dp),
+        )
 
         Column(
             modifier = Modifier
@@ -349,13 +341,10 @@ fun HomeScreen(
             GlassBottomBar(
                 selected = mainTab,
                 onSelect = { tab ->
-                    // 搜索框只属于曲库页，切走时它会收起来。查询若继续生效，「喜欢」
-                    // 列表就会被一个屏幕上看不见的条件过滤——用户只看到歌变少了，却
-                    // 没有任何入口能发现原因，也无从清除它。
-                    if (tab != mainTab) {
-                        mainTab = tab
-                        viewModel.setQuery("")
-                    }
+                    // 搜索框现在两个 tab 都在，查询对两个列表一致生效，用户在任何一页
+                    // 都看得见、也清得掉。以前切走要清空查询，是因为它在"喜欢"页不可见，
+                    // 列表会被一个屏幕上找不到原因的条件过滤掉；这个前提没有了。
+                    mainTab = tab
                 },
                 onRescan = {
                     viewModel.refresh()
@@ -366,6 +355,8 @@ fun HomeScreen(
         }
 
         // 排序面板从右上角展开，方向和触发按钮一致；遮罩层一起淡入。
+        // end 从 16 收到 14：右缘与搜索框、底栏同一条竖线（排序按钮进了搜索框之后
+        // 这三者才有可比性）。
         AnimatedVisibility(
             visible = sortMenuOpen,
             enter = fadeIn(tween(MilanMotion.FastMs)) + scaleIn(
@@ -394,35 +385,34 @@ fun HomeScreen(
 
 @Composable
 private fun AmbientBackdrop(modifier: Modifier = Modifier) {
-    val background = MaterialTheme.colorScheme.background
-    val primary = MaterialTheme.colorScheme.primary
-    val glass = LocalGlassColors.current
+    // 配色不在这里拼：两套配方都在 `ui/theme/Color.kt`（LightHomeBackdrop /
+    // DarkHomeBackdrop），这样"再淡一点 / 再暗一点"是改一处数值，
+    // 而不是在 Canvas 里翻常量。玻璃面板采样的就是这层，改它等于同时改玻璃的底。
+    val backdrop = homeBackdropFor(LocalGlassColors.current.isDark)
 
     Canvas(modifier = modifier) {
-        // Pale-gold wash flowing down into the base background; the glows below
-        // sit on top of it, so glass surfaces sample a warm, non-flat backdrop.
-        val backdropTop = if (glass.isDark) Color(0xFF2E2414) else Color(0xFFF5E8C6)
+        // 竖直播渐变：顶部淡金（深色下是暗金）一路沉到底部近白（近黑）。
+        // 三段而不是两段：两端线性插值在长距离上会把中段压成一块发灰的过渡带，
+        // 给一个显式中段色点就能把曲线捏住。光晕叠在这层之上，玻璃才有东西可折射。
         drawRect(
-            brush = Brush.verticalGradient(listOf(backdropTop, background)),
+            brush = Brush.verticalGradient(
+                colorStops = backdrop.stops.toTypedArray(),
+            ),
         )
 
-        val blend = if (glass.isDark) 0.30f else 0.20f
-
-        fun glow(color: Color, cx: Float, cy: Float, radius: Float) {
+        backdrop.glows.forEach { glow ->
+            val center = Offset(size.width * glow.centerX, size.height * glow.centerY)
+            val radius = size.width * glow.radius
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(color.copy(alpha = blend), Color.Transparent),
-                    center = Offset(cx, cy),
+                    colors = listOf(glow.color.copy(alpha = glow.alpha), Color.Transparent),
+                    center = center,
                     radius = radius,
                 ),
                 radius = radius,
-                center = Offset(cx, cy),
+                center = center,
             )
         }
-
-        glow(primary, size.width * 0.16f, size.height * 0.10f, size.width * 0.80f)
-        glow(Color(0xFFE9DBAE), size.width * 0.92f, size.height * 0.28f, size.width * 0.64f)
-        glow(Color(0xFFD9BE80), size.width * 0.42f, size.height * 0.86f, size.width * 0.74f)
     }
 }
 
@@ -430,9 +420,29 @@ private fun AmbientBackdrop(modifier: Modifier = Modifier) {
 private fun SearchField(
     value: String,
     onValueChange: (String) -> Unit,
+    onSortClick: () -> Unit,
     hazeState: HazeState,
     modifier: Modifier = Modifier,
 ) {
+    // 搜索框是浮起的液态玻璃（用户 2026-10-22 明确要求）。
+    //
+    // 上一版曾把它拉平成一款 5% 的平底，理由是它在 `Column` 里、与列表不重叠。
+    // 布局判断没错，但要的不是"内联输入框"，而是它**看上去**浮在页面上：
+    // 那就必须有投影 + 玻璃棱，也就是回到 `GlassSurface`。
+    //
+    // 材质不在调用点重复覆盖：白点/对比度归零、不染色这些结论统一在
+    // `glassStyleFor` 里，否则搜索框与迷你播放器会各自漂移成两种玻璃。
+    //
+    // 排序按钮在框内右侧（2026-10-22 用户要求「把筛选按钮放进搜索框里面」）。
+    // 它和"清除"一起构成输入框的尾部动作区，顺序是「清除 → 排序」：清除贴着文字
+    // 出现又消失，放在最外层会让排序按钮跟着左右跳。
+    // 放大镜与双箭头改为自绘（方案 03「分层双色」，2026-10-22）：几何与分档在
+    // `ui/components/IconGlyphs.kt`，取色在 `iconInkFor`，这里不再需要 tint。
+    //
+    // 只剩清除按钮还走 `iconInk`。取值不从 `onBackground` 走：它是 `Ink`
+    // （0xFF2A2419，暖黑），去掉 alpha 也还是一层棕，叠 alpha 就成灰棕。
+    val iconInk = iconInkFor(LocalGlassColors.current.isDark)
+
     GlassSurface(
         hazeState = hazeState,
         modifier = modifier.height(46.dp),
@@ -441,15 +451,11 @@ private fun SearchField(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 15.dp),
+                .padding(start = 15.dp, end = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = Icons.Rounded.Search,
-                contentDescription = "搜索",
-                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.62f),
-                modifier = Modifier.size(21.dp),
-            )
+            // 自绘的线框放大镜（方案 03：环 100% / 手柄 55%），笔画 1.4dp @21dp。
+            SearchGlyph(iconSize = 21.dp)
             Spacer(Modifier.width(10.dp))
             BasicTextField(
                 value = value,
@@ -472,13 +478,28 @@ private fun SearchField(
                     onClick = { onValueChange("") },
                     modifier = Modifier.size(26.dp),
                 ) {
+                    // 与放大镜、排序同一枚墨色（用户 2026-10-22 追加要求：清除也一起纯黑）。
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "清除",
-                        tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+                        tint = iconInk,
                         modifier = Modifier.size(15.dp),
                     )
                 }
+            }
+            Spacer(Modifier.width(2.dp))
+            // 34dp 的盒子 + 20dp 图形：图形右缘落在距玻璃边 15.5dp 处，与左侧放大镜
+            // 的 15dp 对齐。颜色与放大镜一致（纯黑 / 深色下 Moonlight）。
+            IconButton(
+                onClick = onSortClick,
+                modifier = Modifier.size(34.dp),
+            ) {
+            // 双箭头（iOS 语义里"排序"是 arrow.up.down，三条递减线才是筛选/调整）：
+            // 左 ↑ 主层 100%、右 ↓ 次层 55%，深浅两个箭头的明度差就是方案 03 的层次。
+            SortGlyph(
+                iconSize = 20.dp,
+                modifier = Modifier.semantics { contentDescription = "排序" },
+            )
             }
         }
     }
@@ -507,10 +528,9 @@ private fun SortMenuOverlay(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
-                .padding(top = 64.dp, end = 16.dp)
+                .padding(top = 64.dp, end = 14.dp)
                 .width(156.dp),
             shape = RoundedCornerShape(20.dp),
-            blurRadius = 28.dp,
         ) {
             Column(Modifier.padding(vertical = 6.dp)) {
                 SortMode.entries.forEach { mode ->
@@ -571,8 +591,9 @@ private fun GlassBottomBar(
     onRescan: () -> Unit,
     hazeState: HazeState,
 ) {
-    // 纯黑在 Night 上只有 1.05:1、等于隐形，所以墨色档在深色主题里换成 Moonlight。
-    val inkAccent = if (LocalGlassColors.current.isDark) Moonlight else Color.Black
+    // 纯黑在 Night 上只有 1.05:1、等于隐形，所以墨色档在深色主题里换成 Moonlight
+    // （与搜索框里的图标同一条规则，见 `iconInkFor`）。
+    val inkAccent = iconInkFor(LocalGlassColors.current.isDark)
 
     // 米兰 tab 的太极每点一次原地转半圈。存的是累积角度而不是布尔值，
     // 所以连点会一圈圈接着转，不会在中途"掉头"回到原位。
@@ -715,7 +736,7 @@ private fun PermissionGate(
                 },
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(22.dp))
             Button(onClick = if (permanentlyDenied) onOpenSettings else onRequest) {

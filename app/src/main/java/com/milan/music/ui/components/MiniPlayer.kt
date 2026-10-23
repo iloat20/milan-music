@@ -26,7 +26,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
@@ -67,12 +69,13 @@ fun MiniPlayer(
                 .padding(start = 9.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 46dp 封面配 8.8dp 圆角（≈19%），与列表 52dp/10dp 同一弧度比例。
+            // 46dp 方图用同一个 4dp 圆角：和列表 52dp 那块是一套形状，
+            // 不是"按边长等比缩放"的两种弧度。见 CoverCornerRadius。
             CoverArt(
                 track = track,
                 artworkRepository = artworkRepository,
                 modifier = Modifier.size(46.dp),
-                cornerRadius = 8.8.dp,
+                cornerRadius = CoverCornerRadius,
                 iconSize = 18.dp,
             )
 
@@ -155,7 +158,7 @@ fun MiniPlayer(
 
 @Composable
 fun EmptyState(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     title: String,
     message: String,
     modifier: Modifier = Modifier,
@@ -182,7 +185,7 @@ fun EmptyState(
             text = message,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            textAlign = TextAlign.Center,
         )
         if (action != null) {
             Spacer(Modifier.height(18.dp))

@@ -1,13 +1,10 @@
 package com.milan.music.ui.player
 
 import android.app.Activity
-import android.graphics.Bitmap
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -24,12 +21,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import android.os.Build
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,11 +34,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
@@ -55,127 +50,185 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
-import com.milan.music.data.userdata.UserData
-import com.milan.music.di.AppContainer
 import com.milan.music.play.PlaybackProgress
+import com.milan.music.play.PlayerController
 import com.milan.music.ui.components.AnimatedPlayPauseIcon
-import com.milan.music.ui.components.CoverArt
 import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.formatDuration
 import com.milan.music.ui.util.noRippleClickable
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.max
 
 private val OnDark = Color(0xFFF6F1E8)
 private val OnDarkMuted = Color(0xB3F6F1E8)
 private val OnDarkFaint = Color(0x66F6F1E8)
 private val FallbackTint = Color(0xFF241C15)
 
-/** Fraction of the cover a swipe may expose when there is no neighbour on that side. */
-private const val EDGE_RESISTANCE = 0.16f
+/**
+ * Height the information area needs under the hero: title, progress bar, controls.
+ *
+ * 300dp，不是 280dp：`FieldTopPadding` 从 30dp 涨到 59dp 之后，信息区自身的内在高度
+ * （实测截图 ≈ 247dp → 277dp）离 280 只剩 3dp，短窗口里再有点字号放大就会把控制
+ * 挤出屏幕。留 23dp 余量。
+ *
+ * Portrait never reaches this floor. It exists so a short window (640dp tall is still
+ * common) shortens the cover instead of clipping the controls.
+ */
+private val MinTransportHeight = 300.dp
 
-/** How long a committed swipe waits for the session to confirm the new track. */
-private const val SWITCH_TIMEOUT_MS = 600L
+/** 信息区（标题、进度、控制）的左右边距。 */
+private val PlayerSidePadding = 24.dp
 
 /**
- * The three covers mounted around the current track, in playback order.
+ * 进度条两端的位置：**左端与歌曲名对齐，右端与收藏图标对齐**，所以两根边距不一样长。
  *
- * Kept as local state by the player screen instead of reading [com.milan.music.play.PlayerUiState]
- * directly: a committed swipe shifts the row and resets its offset in one frame,
- * which is only pixel-continuous if the position and the pages change together.
+ * 右端不是 [PlayerSidePadding]：收藏图标是 24dp 的图形装在 48dp 的触摸盒里、盒再靠右
+ * 边距收进来，所以图标的右缘比盒子右缘更靠里。实测截图（873×1920，≈2.221 px/dp）里心形
+ * 右缘距屏幕右边 93px ≈ **42dp**，盒子的右缘才是 24dp 那一条。用户要的是"从歌曲名到
+ * 喜欢的图标的长度"，取图形右缘才是那根线；用 24dp 会让进度条探出去约 18dp。
  */
-private data class CoverPages(
-    val previous: Track? = null,
-    val current: Track? = null,
-    val next: Track? = null,
-)
+private val ProgressStartInset = PlayerSidePadding
+private val ProgressEndInset = 42.dp
 
+/**
+ * 封面下缘与标题之间的距离：色场先裸一段，标题才不贴在图上。
+ *
+ * 59dp = 30dp 起步 + 20px（≈9dp，用户第一次要求"整体下移 20px"）+ 20dp（第二次
+ * 要求"信息区再下移 20dp"）。只加在这里 —— 三段间距任选一段推开都会连带改变内部
+ * 节奏，而"整体下移"只该动这一处，信息、进度、控制三者的相对距离不变。
+ */
+private val FieldTopPadding = 59.dp
+
+/** 歌曲信息与进度条之间的距离。 */
+private val ProgressTopGap = 26.dp
+
+/** 进度条时间标签与播放控制之间的距离。控制整组因此再往下落一点，离拇指更近。 */
+private val ControlsTopGap = 26.dp
+
+/** 边缘模糊那一层的不透明度。太高会把色场盖成一张糊图，太低就又变回一条硬边。 */
+private const val EdgeHazeAlpha = 0.55f
+
+/**
+ * 播放页。
+ *
+ * 状态和动作全部来自 [PlayerViewModel]：收藏、seek、切歌都只有一条路径，UI 也不再持有
+ * [com.milan.music.di.AppContainer]（它带 `Context`/`DataStore`，拿在 composable 手里就
+ * 既不能 `@Preview` 也不能只注入状态做 UI 测试）。
+ *
+ * [player] 与 [artwork] 是留给 [CoverCarousel] 的**显式**依赖：轮播自己会加载它要画的
+ * 封面，也必须等会话确认换曲之后才落位（见 `CoverCarousel.launchSwitch`）——那段等待
+ * 拿的是 `PlayerController.state`，抄一份进 ViewModel 只会让两处状态各自演化。
+ */
 @Composable
-fun PlayerScreen(
-    container: AppContainer,
+internal fun PlayerScreen(
+    viewModel: PlayerViewModel,
+    player: PlayerController,
+    artwork: ArtworkRepository,
     onBack: () -> Unit,
 ) {
-    val playerState by container.player.state.collectAsStateWithLifecycle()
-    val userData by container.userData.data
-        .collectAsStateWithLifecycle(initialValue = UserData())
+    val playerState by viewModel.playback.collectAsStateWithLifecycle()
+    val isFavorite by viewModel.isFavorite.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
     val track = playerState.currentTrack
-    val isFavorite = track != null && userData.favorites.contains(track.id)
 
     val density = LocalDensity.current
     val dismissThreshold = with(density) { 110.dp.toPx() }
 
-    // 不按 track.id 重置：新封面解码完成前继续显示上一张，
-    // 否则每次切歌都会先闪一下纯色底。解码成功后 Crossfade 再接管。
-    var backdrop by remember { mutableStateOf<ImageBitmap?>(null) }
-    var dominant by remember { mutableStateOf<Color?>(null) }
-
+    // 色场**故意**不跟曲目一起作废：新封面解码完成前沿用上一套配色，否则每次切歌都会
+    // 先闪一下兜底深褐。解码完成后由色场自己的颜色动画接力过渡。
+    var palette by remember { mutableStateOf<PlayerPalette?>(null) }
+    // 封面像素就不同了 —— 它们按曲目归属作废（见 [PlayerArtwork]）：`null` 表示这一帧
+    // 没有封面，而不是"沿用上一首"。上一首的镜像/糊版画在下一首上，是错误内容。
+    var loaded by remember { mutableStateOf<PlayerArtwork?>(null) }
+    // 轮播**此刻画在中央**的那一页。它和 `track`（会话当前曲目）会短暂不同：会话先换曲，
+    // 轮播要等翻页动画走完并确认之后才换页。倒影带子和上缘糊版必须跟这个，不能跟 `track`
+    // —— 跟错了就是"带子已经是新封面、上面那张还是旧封面"的那一下闪（第 59 批）。
+    var shownTrack by remember { mutableStateOf(track) }
+    // 封面横向滑动位移。倒影叠层要跟着封面一起走（见 [CoverCarousel] 的同名参数）：
+    // 它画的是"封面底部的继续"，封面被拖走时它也必须走。
+    val coverOffset = remember { Animatable(0f) }
     LaunchedEffect(track?.id) {
         val target = track ?: return@LaunchedEffect
-        val small = container.artwork.loadBackdrop(target)
-        backdrop = small
-        dominant = small?.let { image ->
-            withContext(Dispatchers.Default) { dominantColorOf(image) }
-        }
+        val result = viewModel.loadArtwork(target)
+        loaded = result
+        result.palette?.let { palette = it }
     }
 
-    val coverBackground = dominant?.let { blend(it, Color.Black, 0.38f) } ?: FallbackTint
-    val gradientTop = dominant?.let { blend(it, Color.White, 0.20f) } ?: FallbackTint
-    val gradientBottom = dominant?.let { blend(it, Color.Black, 0.62f) } ?: Color(0xFF0B0A09)
+    // 封面区域（清晰封面之上那条糊版、镜面线以下的倒影）的三个画源，归属都必须与
+    // **轮播中央那一页**一致：优先取同步缓存（与封面同帧、无闪），缓存未命中时退回
+    // 这次加载的产物 —— 但那个产物只有在属于同一首时才行。
+    val shownAlbum = shownTrack?.albumId
+    val heroSource = loaded?.forTrack(shownTrack?.id)
+    val syncCover = remember(shownAlbum) {
+        shownAlbum?.let { viewModel.cachedCover(it) }
+    }
+    val syncMirror = remember(shownAlbum) {
+        shownAlbum?.let { viewModel.cachedMirror(it) }
+    }
+    val edgeHaze = heroSource?.haze
+    val bandCover = syncCover ?: heroSource?.cover
+    val bandMirror = syncMirror ?: heroSource?.mirror
+    // 三个开关共用的唯一判据，见 [canDrawBand]。
+    val bandAvailable = canDrawBand(bandCover != null, bandMirror != null, Build.VERSION.SDK_INT)
 
-    // The cover fills the whole screen, so the system bars sit on arbitrary artwork.
-    // Force light system icons for as long as this screen is visible.
+    val colors = palette ?: FallbackPalette
+
+    // 色场现在是封面本色，浅色封面会得到一块很亮的底色：系统栏图标必须跟着翻深浅，
+    // 否则白图标压在浅色封面上就是隐形的。状态栏压在上缘那条色带（top）上，导航栏
+    // 压在色场（bottom）底部。阈值 0.179 是黑白对比度相等的那个交点。
+    val darkStatusIcons = luminanceOf(colors.top) > 0.179f
+    val darkNavIcons = luminanceOf(colors.bottom) > 0.179f
+
     val view = LocalView.current
     val window = (view.context as? Activity)?.window
-    DisposableEffect(window) {
+    DisposableEffect(window, darkStatusIcons, darkNavIcons) {
         if (window == null) {
             onDispose { }
         } else {
             val controller = WindowCompat.getInsetsController(window, view)
             val previousStatus = controller.isAppearanceLightStatusBars
             val previousNav = controller.isAppearanceLightNavigationBars
-            controller.isAppearanceLightStatusBars = false
-            controller.isAppearanceLightNavigationBars = false
+            controller.isAppearanceLightStatusBars = darkStatusIcons
+            controller.isAppearanceLightNavigationBars = darkNavIcons
             onDispose {
                 controller.isAppearanceLightStatusBars = previousStatus
                 controller.isAppearanceLightNavigationBars = previousNav
@@ -188,52 +241,6 @@ fun PlayerScreen(
     // off-screen before popping; below it springs back.
     val offsetY = remember { Animatable(0f) }
     val isSettling = remember { mutableStateOf(false) }
-
-    // 页面自下而上滑入的同时，封面做一次很轻的 0.94→1 落位。
-    // 不是共享元素，只是给进场一个视觉重心，幅度刻意控制在几乎察觉不到的程度。
-    val coverEntrance = remember { Animatable(0.94f) }
-    LaunchedEffect(Unit) {
-        coverEntrance.animateTo(
-            targetValue = 1f,
-            animationSpec = spring(
-                dampingRatio = 0.82f,
-                stiffness = Spring.StiffnessMediumLow,
-            ),
-        )
-    }
-
-    // Cover carousel: the previous and next artwork are mounted one page to
-    // either side of the current one. Both are decoded while the player is open,
-    // so a drag reveals the real cover instead of the blurred backdrop.
-    //
-    // `coverPages` is a local snapshot rather than a direct read of `playerState`:
-    // a committed swipe has to shift the row and reset the offset in the same
-    // frame, while the session still reports the outgoing track for a few
-    // milliseconds after the seek.
-    var coverPages by remember {
-        mutableStateOf(
-            CoverPages(
-                previous = playerState.previousTrack,
-                current = playerState.currentTrack,
-                next = playerState.nextTrack,
-            ),
-        )
-    }
-    val coverOffsetX = remember { Animatable(0f) }
-    val isCoverAnimating = remember { mutableStateOf(false) }
-
-    // Track changes the gesture did not initiate: song end, notification,
-    // Bluetooth, widget. Swipes update `coverPages` themselves and wait for the
-    // session, so their transient state must not overwrite the shifted row.
-    LaunchedEffect(playerState.previousTrack, playerState.currentTrack, playerState.nextTrack) {
-        if (!isCoverAnimating.value) {
-            coverPages = CoverPages(
-                previous = playerState.previousTrack,
-                current = playerState.currentTrack,
-                next = playerState.nextTrack,
-            )
-        }
-    }
 
     // Measured height of the sheet, published by BoxWithConstraints below. Needed
     // because the dismissal can start from outside that scope (system back).
@@ -350,470 +357,359 @@ fun PlayerScreen(
             dismissToHome()
         }
 
-        // Square cover sized to the width, but capped so it never collides with the
-        // controls on short screens.
-        val coverSide = minOf(maxWidth, maxHeight * 0.52f)
-        // 背景：模糊封面叠在由封面主色生成的渐变上。方形封面若拉伸到
-        // 9:19.5 的屏幕会被放大 ~2.2 倍并裁掉大半，所以清晰封面保持 1:1，
-        // 只让背景层铺满。颜色与图片各自做慢速交叉淡入，切歌不闪白/闪黑。
-        PlayerBackdrop(
-            top = gradientTop,
-            middle = coverBackground,
-            bottom = gradientBottom,
-            backdrop = backdrop,
-        )
+        // 封面顶到屏幕最上面。照片按自身比例铺满宽度（高 = 页宽 × 源图比例，零裁零拉），
+        // 框比它高出来的那一段由下面的毛玻璃续接 —— 框多高只决定续接多长。
+        // 高度由 [CoverLayout.heroHeight] 统一算，几何只在那一处定义。
+        val heroHeight = CoverLayout.heroHeight(maxHeight, MinTransportHeight)
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.28f),
-                        0.42f to Color.Black.copy(alpha = 0.04f),
-                        0.70f to Color.Black.copy(alpha = 0.55f),
-                        1f to Color.Black.copy(alpha = 0.90f),
-                    ),
-                ),
-        )
+        // 轮播一页的行程（页宽 + 页缝）。倒影叠层要跟封面走**同一个公式**，就得拿到同
+        // 一个 pitch —— 它和 CoverCarousel 内部的 `maxWidth` 是同一个值（封面框满宽）。
+        val pitchPx = with(density) { CoverLayout.pitch(pageWidth = maxWidth).toPx() }
 
-        val coverSidePx = with(density) { coverSide.toPx() }
+        // 照片铺满整框（Crop），所以照片底边就是框底 —— 淡出终点恒为 PhotoBottom。
+        // 取景负责裁切，几何这里不需要知道封面比例。
+        val photoBottom = CoverLayout.PhotoBottom
 
-        // Past the threshold the row finishes the slide, the player changes track,
-        // and the offset resets only once the session confirms the incoming track.
-        // The cover under the finger then becomes the current page pixel for pixel:
-        // no blank gap, no second slide-in.
-        val launchCoverSwitch: (Boolean) -> Unit = { toNext ->
-            if (!isCoverAnimating.value) {
-                val incoming = if (toNext) coverPages.next else coverPages.previous
-                if (incoming != null) {
-                    isCoverAnimating.value = true
-                    scope.launch {
-                        val target = if (toNext) -coverSidePx else coverSidePx
-                        coverOffsetX.animateTo(
-                            target,
-                            tween(160, easing = FastOutSlowInEasing),
-                        )
+        // 色场的交界点按**照片**在整页里的真实占比算（不是框）：换一台屏幕比例不同的
+        // 机器，色场也不会从照片中间或者照片下方开始。
+        val pageHeight = maxHeight.value.coerceAtLeast(1f)
+        val coverBottom = (photoBottom * heroHeight.value / pageHeight).coerceIn(0f, 1f)
 
-                        // The transport's previous() restarts the current song when
-                        // it has been playing for more than 3 s. A swipe revealed the
-                        // previous cover, so it must move to that track instead.
-                        if (toNext) container.player.next() else container.player.skipToPrevious()
+        PlayerBackdrop(palette = colors, coverBottom = coverBottom)
 
-                        // The controller is asynchronous. Hold the row on the
-                        // incoming page until the session actually reports it, then
-                        // adopt its neighbours and reset the offset together.
-                        val switched = withTimeoutOrNull(SWITCH_TIMEOUT_MS) {
-                            container.player.state.first { it.currentTrack?.id == incoming.id }
-                        } != null
-                        if (switched) {
-                            val latest = container.player.state.value
-                            coverPages = CoverPages(
-                                previous = latest.previousTrack,
-                                current = latest.currentTrack,
-                                next = latest.nextTrack,
-                            )
-                            coverOffsetX.snapTo(0f)
-                        } else {
-                            // The seek never landed (session gone): put the row
-                            // back rather than showing a track that is not playing.
-                            coverOffsetX.animateTo(
-                                0f,
-                                spring(stiffness = Spring.StiffnessMediumLow),
-                            )
-                        }
-                        isCoverAnimating.value = false
-                    }
-                }
-            }
-        }
+        val reflectionHeight = (maxHeight - heroHeight).coerceAtLeast(0.dp)
 
-        // Read inside the gesture detector, never as pointerInput keys: a track
-        // change during a drag updates the reveal target without cancelling the
-        // gesture in progress.
-        val latestCoverPages by rememberUpdatedState(coverPages)
-        val latestLaunchCoverSwitch by rememberUpdatedState(launchCoverSwitch)
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 20.dp)
-                .size(coverSide)
-                .graphicsLayer {
-                    scaleX = coverEntrance.value
-                    scaleY = coverEntrance.value
-                }
-                // The neighbouring pages sit outside this square at rest; clip
-                // them so they only enter through the edges while dragging.
-                .clipToBounds()
-                .pointerInput(coverSidePx) {
-                    // Cover follows the finger horizontally; on release past the
-                    // threshold the carousel finishes the page, otherwise it springs
-                    // back. Level with the vertical drag on the root: the gesture
-                    // system routes each drag by its dominant direction.
-                    //
-                    // Pages and the switch action are read through
-                    // rememberUpdatedState so a track change during the gesture
-                    // updates what the next frame reveals without tearing down the
-                    // drag detector (the pointerInput key is only the page width).
-                    val swipeThreshold = 80.dp.toPx()
-                    detectHorizontalDragGestures(
-                        onDragStart = { },
-                        onHorizontalDrag = { change, dragAmount ->
-                            if (!isCoverAnimating.value) {
-                                // A missing neighbour (single-track queue) may only
-                                // stretch a little, never far enough to commit.
-                                val min = if (latestCoverPages.next != null) {
-                                    -coverSidePx
-                                } else {
-                                    -coverSidePx * EDGE_RESISTANCE
-                                }
-                                val max = if (latestCoverPages.previous != null) {
-                                    coverSidePx
-                                } else {
-                                    coverSidePx * EDGE_RESISTANCE
-                                }
-                                val target = (coverOffsetX.value + dragAmount)
-                                    .coerceIn(min, max)
-                                scope.launch { coverOffsetX.snapTo(target) }
-                            }
-                            change.consume()
-                        },
-                        onDragEnd = {
-                            if (isCoverAnimating.value) {
-                                return@detectHorizontalDragGestures
-                            }
-                            when {
-                                coverOffsetX.value < -swipeThreshold &&
-                                    latestCoverPages.next != null -> latestLaunchCoverSwitch(true)
-                                coverOffsetX.value > swipeThreshold &&
-                                    latestCoverPages.previous != null -> latestLaunchCoverSwitch(false)
-                                else -> scope.launch {
-                                    coverOffsetX.animateTo(
-                                        0f,
-                                        spring(stiffness = Spring.StiffnessMediumLow),
-                                    )
-                                }
-                            }
-                        },
-                        onDragCancel = {
-                            if (!isCoverAnimating.value) {
-                                scope.launch {
-                                    coverOffsetX.animateTo(
-                                        0f,
-                                        spring(stiffness = Spring.StiffnessMediumLow),
-                                    )
-                                }
-                            }
-                        },
+        Column(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(heroHeight),
+            ) {
+                // 1) 边缘模糊：把封面自己的缩略图放大铺在清晰封面底下，只在封面上缘
+                //    淡出的那一段透出来。于是上缘先是"同一张图的糊版"，再落到背景色，
+                //    而不是一条从图直接切到纯色的边。下缘不铺它 —— 那里接的是
+                //    CoverReflection，两层都管底缘只会叠出一团糊影。
+                if (edgeHaze != null) {
+                    Image(
+                        bitmap = edgeHaze,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .blur(28.dp)
+                            .alpha(EdgeHazeAlpha)
+                            .edgeHazeMask(),
                     )
                 }
-                .combinedClickable(
-                    onClick = { },
-                    onDoubleClick = { latestLaunchCoverSwitch(true) },
-                ),
-        ) {
-            // Both neighbours stay composed for the whole session so their
-            // artwork is decoded before the finger moves. Draw order is left,
-            // current, right; pure translation keeps them from overlapping.
-            CoverSlot(
-                track = coverPages.previous,
-                slot = -1,
-                coverSidePx = coverSidePx,
-                offsetX = coverOffsetX,
-                artworkRepository = container.artwork,
-                backgroundColor = coverBackground,
-            )
-            CoverSlot(
-                track = coverPages.current,
-                slot = 0,
-                coverSidePx = coverSidePx,
-                offsetX = coverOffsetX,
-                artworkRepository = container.artwork,
-                backgroundColor = coverBackground,
-            )
-            CoverSlot(
-                track = coverPages.next,
-                slot = 1,
-                coverSidePx = coverSidePx,
-                offsetX = coverOffsetX,
-                artworkRepository = container.artwork,
-                backgroundColor = coverBackground,
-            )
-        }
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 22.dp)
-                .padding(bottom = 100.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // 标题/艺人整块做上下交接：新内容从下方少许进入，旧内容向上退出。
-                // 只在曲目 id 变化时触发，播放进度与收藏状态不会打断文字。
-                AnimatedContent(
-                    targetState = track,
-                    modifier = Modifier.weight(1f),
-                    transitionSpec = {
-                        val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 } +
-                            fadeIn(tween(MilanMotion.MediumMs))
-                        val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 3 } +
-                            fadeOut(tween(MilanMotion.FastMs))
-                        enter togetherWith exit
-                    },
-                    contentAlignment = Alignment.CenterStart,
-                    contentKey = { it?.id },
-                    label = "player-track-text",
-                ) { item ->
-                    Column {
-                        Text(
-                            text = item?.displayTitle ?: "未在播放",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = OnDark,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = item?.displayArtist ?: "",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = OnDarkMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                // 与列表里的收藏按钮保持一致：不用 IconButton，
-                // 避免按压时在封面上铺出一块圆形底色。
+                // 2) 清晰封面，上缘用 DstIn 遮罩淡出。
+                //    用遮罩而不是往上盖色：色场本身在随切歌做颜色动画，盖色必须逐帧
+                //    同色才看不见接缝；遮罩只是把封面自己的透明度压到 0，底下是什么
+                //    就透出什么，怎么变都不会出缝。
+                //
+                //    下缘**不淡出**（第 44 批）：倒影带子在带内的覆盖率不是 1（逐层 over，
+                //    `1 − Π(1−w_i) < Σw`），封面的不透明度就是它唯一的不透底来源，封面
+                //    若在这里淡成 0，带子里就会透出一条背景色带 —— 那正是"封面下方一块
+                //    平色"的来源。隔壁页由 `fadeNeighbourBottoms` 单独处理。
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
-                        .noRippleClickable(
-                            role = Role.Button,
-                            onClick = {
-                                val id = track?.id ?: return@noRippleClickable
-                                scope.launch { container.userData.toggleFavorite(id) }
-                            },
-                        ),
-                    contentAlignment = Alignment.Center,
+                        .fillMaxSize()
+                        .heroFadeMask(fadeBottom = !bandAvailable),
                 ) {
-                    AnimatedContent(
-                        targetState = isFavorite,
-                        transitionSpec = {
-                            val enter = scaleIn(
-                                initialScale = 0.55f,
-                                animationSpec = spring(
-                                    dampingRatio = 0.45f,
-                                    stiffness = Spring.StiffnessMediumLow,
-                                ),
-                            ) + fadeIn(tween(MilanMotion.FastMs))
-                            val exit = scaleOut(
-                                targetScale = 0.7f,
-                                animationSpec = tween(MilanMotion.FastMs),
-                            ) + fadeOut(tween(MilanMotion.FastMs / 2))
-                            enter togetherWith exit
-                        },
-                        contentAlignment = Alignment.Center,
-                        contentKey = { it },
-                        label = "player-favorite",
-                    ) { liked ->
-                        Icon(
-                            imageVector = if (liked) {
-                                Icons.Rounded.Favorite
-                            } else {
-                                Icons.Rounded.FavoriteBorder
-                            },
-                            contentDescription = if (liked) "取消喜欢" else "喜欢",
-                            tint = if (liked) LikedRed else OnDark,
-                            modifier = Modifier.size(24.dp),
-                        )
-                    }
+                    CoverCarousel(
+                        previousTrack = playerState.previousTrack,
+                        currentTrack = playerState.currentTrack,
+                        nextTrack = playerState.nextTrack,
+                        player = player,
+                        artworkRepository = artwork,
+                        // 透明：照片只占框的上面那一块，它下面必须让出位置给毛玻璃
+                        // 续接。铺色的话又回到第 34 批那面"平色带"。
+                        backgroundColor = Color.Transparent,
+                        modifier = Modifier.fillMaxSize(),
+                        offsetX = coverOffset,
+                        // 隔壁页没有倒影叠层跟着它：它滑进来时必须自己淡出底边，
+                        // 否则镜面线上会露出它的一条硬边。
+                        fadeNeighbourBottoms = bandAvailable,
+                        // 中央这一页是谁 —— 带子跟着它走，与翻页同帧。
+                        onTrackShown = { shownTrack = it },
+                    )
                 }
             }
 
-            Spacer(Modifier.height(14.dp))
-
-            AppleMusicProgress(
-                progress = container.player.progress,
-                fallbackDurationMs = track?.duration ?: 0L,
-                onSeek = container.player::seekTo,
+            // 倒影栈：位置正好是封面框底 —— 也就是镜面线。
+            // 它自己**不占排版高度**（`OverlayLayoutHeight = 0`，见 CoverReflection），
+            // 只负责绘制：向上溢出 CoverRamp 盖住封面末段，向下铺满整页。
+            //   · 排在封面之后、[PlayerTransport] 之前 → 文字与控制永远在最上层，
+            //     不会被倒影的半透明盖成一片洗白；
+            //   · 高度必须报 0：它画 557dp，若照实报，Column 会把控制条整体推到屏幕外
+            //     （第 55 批真机：整屏只剩封面，歌名/进度/按钮全部出界）；
+            //   · **横向跟着封面走**：倒影是封面的镜像，封面被手指拖走时它必须一起走。
+            //     钉在屏幕上就是"一层画着封面下半部分的叠加层"（2026-10-23 第 58 批）。
+            CoverReflection(
+                cover = bandCover,
+                mirror = bandMirror,
+                heroHeight = heroHeight,
+                height = reflectionHeight,
+                // 与封面同一套取景：横向裁切对称，镜面线两侧的内容才严格连续。
+                contentScale = CoverLayout.HeroContentScale,
+                // 和封面页**同一个公式**（slot = 0）：手指拖多少，倒影就走多少。
+                modifier = Modifier.offset {
+                    IntOffset(pageTranslationPx(0, pitchPx, coverOffset.value).roundToInt(), 0)
+                },
             )
 
-            Spacer(Modifier.height(10.dp))
-
-            PlaybackControls(
+            PlayerTransport(
+                track = track,
+                isFavorite = isFavorite,
                 isPlaying = playerState.isPlaying,
-                onTogglePlay = container.player::togglePlayPause,
-                onPrevious = container.player::previous,
-                onNext = container.player::next,
+                progress = viewModel.progress,
+                onToggleFavorite = viewModel::toggleFavorite,
+                onSeek = viewModel::seekTo,
+                onTogglePlay = viewModel::togglePlayPause,
+                onPrevious = viewModel::previous,
+                onNext = viewModel::next,
+                // 不加卡片、不加圆角：封面下方就是页面本身那块色场。
+                modifier = Modifier.fillMaxWidth(),
             )
         }
+
     }
 }
 
 /**
- * 播放页背景：主色渐变 + 模糊封面。
+ * 封面的 DstIn 遮罩：上缘渐显，下缘按 [fadeBottom] 决定是否渐隐到框底。
  *
- * 把颜色动画收在这个小 composable 里，切歌时只重绘背景层，
- * 不会让标题、进度条、封面轮播跟着每帧重组。
+ * [fadeBottom] 为 true 表示这一页**底下没有倒影叠层跟着它**：封面下面是纯色场，
+ * 不淡出就是一条硬边。两种情况会走到这里 —— 画不出倒影（HARDWARE 位图读不到像素、
+ * 或老设备降级失败），以及**横滑时滑进来的隔壁页**（叠层只属于当前这一页）。
+ *
+ * 能画倒影的那一页必须保持不透明到框底：倒影带子在带内的覆盖率不是 1（逐层 over
+ * 叠加，`1 − Π(1−w_i) < Σw`），封面的不透明度就是它唯一的不透底来源，淡掉就会在
+ * 接缝上方透出一条背景色带（第 44 批的老问题）。
+ */
+private fun Modifier.heroFadeMask(fadeBottom: Boolean): Modifier {
+    val start = CoverLayout.HeroFadeOut
+    val end = CoverLayout.PhotoBottom.coerceAtLeast(start + 0.02f)
+    return graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            drawRect(
+                brush = if (fadeBottom) {
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        CoverLayout.HeroFadeIn to Color.Black,
+                        start to Color.Black,
+                        end to Color.Transparent,
+                    )
+                } else {
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        CoverLayout.HeroFadeIn to Color.Black,
+                    )
+                },
+                blendMode = BlendMode.DstIn,
+            )
+        }
+}
+
+/**
+ * 边缘模糊层的遮罩：只在封面的上缘显形，往下很快收干净。
+ *
+ * 底缘不归它管 —— 封面下半段沉进的是 [CoverReflection] 那块倒影，
+ * 两层都管底缘只会叠出一团糊影。所以从上往下读到的顺序是「背景色 → 模糊封面 →
+ * 清晰封面」，这就是"模糊 + 背景色渐变"。
+ */
+private fun Modifier.edgeHazeMask(): Modifier =
+    graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            drawRect(
+                brush = Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    0.07f to Color.Black,
+                    0.24f to Color.Transparent,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+
+/**
+ * 页面背景：上下两段由封面顶端 10%、底端 20% 两条色带推出来的色场。
+ *
+ * 封面贴到页面最上面，所以顶端这一段不靠"留白"露出来：页面从 y = 0 就是
+ * [PlayerPalette.top]，封面自己的上缘在那里淡出，露出的正是这层颜色 —— 状态栏因此
+ * 压在一块确定的底色上，不必再另铺暗角。走到封面底边换成 [PlayerPalette.bottom]，
+ * 再往下整片平铺成信息区的底。
+ *
+ * 颜色动画收在这个小 composable 里：切歌时只有这一层逐帧重绘，标题、进度条和封面
+ * 轮播不跟着每帧重组。
  */
 @Composable
 private fun PlayerBackdrop(
-    top: Color,
-    middle: Color,
-    bottom: Color,
-    backdrop: ImageBitmap?,
+    palette: PlayerPalette,
+    coverBottom: Float,
+    modifier: Modifier = Modifier,
 ) {
     val animatedTop by animateColorAsState(
-        targetValue = top,
+        targetValue = palette.top,
         animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
         label = "backdrop-top",
     )
-    val animatedMiddle by animateColorAsState(
-        targetValue = middle,
-        animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
-        label = "backdrop-middle",
-    )
     val animatedBottom by animateColorAsState(
-        targetValue = bottom,
+        targetValue = palette.bottom,
         animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
         label = "backdrop-bottom",
     )
 
+    // 封面从 y = 0 开始，所以顶部色带不是"露在外面的一条"，而是封面顶部淡出后落到的
+    // 那一层颜色：渐变从页面顶端就是 [PlayerPalette.top]，一路走到封面底边变成色场，
+    // 再往下整片平铺。中途那段过渡被封面自己盖住，看得见的只有两端。
+    val bottomStop = coverBottom.coerceIn(0.02f, 1f)
+
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(
-                Brush.verticalGradient(listOf(animatedTop, animatedMiddle, animatedBottom)),
+                Brush.verticalGradient(
+                    0f to animatedTop,
+                    bottomStop to animatedBottom,
+                    1f to animatedBottom,
+                ),
             ),
-    ) {
-        Crossfade(
-            targetState = backdrop,
-            modifier = Modifier
-                .fillMaxSize()
-                // 模糊放在 Crossfade 外层：过渡期间只做一次全屏模糊，
-                // 而不是新旧两张图各模糊一次。
-                .blur(48.dp)
-                .alpha(0.55f),
-            animationSpec = tween(MilanMotion.AmbientMs, easing = MilanMotion.Standard),
-            label = "player-backdrop-image",
-        ) { image ->
-            if (image != null) {
-                Image(
-                    bitmap = image,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        }
-    }
+    )
 }
 
 /**
- * One page of the three-cover carousel.
+ * 下半页的信息区：标题、进度条、播放控制。
  *
- * The page is laid out at the centre of the clipping box and translated by its
- * slot position plus the drag offset. Reading the offset inside `graphicsLayer`
- * keeps the drag out of recomposition: only the layer's translation changes per
- * pointer event.
- *
- * `null` neighbours are omitted entirely (a one-track queue has none); the
- * current slot still renders [CoverArt]'s deterministic placeholder when nothing
- * is queued, matching the previous single-cover behaviour.
+ * 直接画在色场上，没有卡片、没有圆角、没有底板 —— 参考图里下半页就是页面本身，
+ * 控件浮在那块颜色上。三组内容从封面底边往下依次排开、都不吸底：进度条与播放控制
+ * 紧贴在歌曲信息下面，屏幕下方留给色场。
  */
 @Composable
-private fun CoverSlot(
+private fun PlayerTransport(
     track: Track?,
-    slot: Int,
-    coverSidePx: Float,
-    offsetX: Animatable<Float, AnimationVector1D>,
-    artworkRepository: ArtworkRepository,
-    backgroundColor: Color,
+    isFavorite: Boolean,
+    isPlaying: Boolean,
+    progress: StateFlow<PlaybackProgress>,
+    onToggleFavorite: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onTogglePlay: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    if (track == null && slot != 0) return
+    // 左右边距不放在这一层：进度条要和封面一样满宽（封面是 edge-to-edge 的），
+    // 被 Column 统一加边距的话它只能缩在 24dp 里。所以边距下沉到真正需要它的
+    // 两处 —— 歌曲信息、播放控制；进度条自己决定哪部分要贴边。
+    Column(modifier = modifier) {
+        Spacer(Modifier.height(FieldTopPadding))
 
-    // 轮播落位要求"手指下的那张图"在同一帧变成当前页，不能做 Crossfade。
-    // 以 track.id 重建 CoverArt 的淡入状态：同曲目内的占位图→封面仍会淡入，
-    // 但切到另一首歌时直接以缓存封面起画。
-    key(track?.id) {
-        CoverArt(
-            track = track,
-            artworkRepository = artworkRepository,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    translationX = slot * coverSidePx + offsetX.value
+        Row(
+            modifier = Modifier.padding(horizontal = PlayerSidePadding),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+                    // 标题/艺人整块做上下交接：新内容从下方少许进入，旧内容向上退出。
+            // 只在曲目 id 变化时触发，播放进度与收藏状态不会打断文字。
+            AnimatedContent(
+                targetState = track,
+                modifier = Modifier.weight(1f),
+                transitionSpec = {
+                    val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 } +
+                        fadeIn(tween(MilanMotion.MediumMs))
+                    val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 3 } +
+                        fadeOut(tween(MilanMotion.FastMs))
+                    enter togetherWith exit
                 },
-            cornerRadius = 0.dp,
-            iconSize = 72.dp,
-            trimMargins = true,
-            contentScale = ContentScale.Crop,
-            backgroundColor = backgroundColor,
+                contentAlignment = Alignment.CenterStart,
+                contentKey = { it?.id },
+                label = "player-track-text",
+            ) { item ->
+                Column {
+                    Text(
+                        text = item?.displayTitle ?: "未在播放",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = OnDark,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = item?.displayArtist ?: "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = OnDarkMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            // 与列表里的收藏按钮保持一致：不用 IconButton，
+            // 避免按压时在色场上铺出一块圆形底色。
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .noRippleClickable(
+                        role = Role.Button,
+                        onClick = onToggleFavorite,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                AnimatedContent(
+                    targetState = isFavorite,
+                    transitionSpec = {
+                        val enter = scaleIn(
+                            initialScale = 0.55f,
+                            animationSpec = spring(
+                                dampingRatio = 0.45f,
+                                stiffness = Spring.StiffnessMediumLow,
+                            ),
+                        ) + fadeIn(tween(MilanMotion.FastMs))
+                        val exit = scaleOut(
+                            targetScale = 0.7f,
+                            animationSpec = tween(MilanMotion.FastMs),
+                        ) + fadeOut(tween(MilanMotion.FastMs / 2))
+                        enter togetherWith exit
+                    },
+                    contentAlignment = Alignment.Center,
+                    contentKey = { it },
+                    label = "player-favorite",
+                ) { liked ->
+                    Icon(
+                        imageVector = if (liked) {
+                            Icons.Rounded.Favorite
+                        } else {
+                            Icons.Rounded.FavoriteBorder
+                        },
+                        contentDescription = if (liked) "取消喜欢" else "喜欢",
+                        tint = if (liked) LikedRed else OnDark,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+        }
+
+        // 进度条从歌曲名的左缘拉到收藏图标的右缘（见 [ProgressStartInset] /
+        // [ProgressEndInset]），既不是满屏、也不是对称的 24dp 边距。
+        Spacer(Modifier.height(ProgressTopGap))
+
+        AppleMusicProgress(
+            progress = progress,
+            fallbackDurationMs = track?.duration ?: 0L,
+            onSeek = onSeek,
+        )
+
+        Spacer(Modifier.height(ControlsTopGap))
+
+        PlaybackControls(
+            isPlaying = isPlaying,
+            onTogglePlay = onTogglePlay,
+            onPrevious = onPrevious,
+            onNext = onNext,
+            modifier = Modifier.padding(horizontal = PlayerSidePadding),
         )
     }
 }
-
-/** Most frequent saturated-ish colour, ignoring near-black and near-white pixels. */
-private fun dominantColorOf(image: ImageBitmap): Color {
-    val source = image.asAndroidBitmap()
-    // getPixels() throws on a HARDWARE bitmap, and `loadThumbnail` may return one.
-    // The copy only happens on that path, and the backdrop is 96 px.
-    val bitmap = if (source.config == Bitmap.Config.HARDWARE) {
-        source.copy(Bitmap.Config.ARGB_8888, false) ?: return FallbackTint
-    } else {
-        source
-    }
-    val histogram = IntArray(16 * 16 * 16)
-
-    val stepX = max(1, bitmap.width / 32)
-    val stepY = max(1, bitmap.height / 32)
-
-    // One bulk JNI copy instead of a getPixel call per sample point.
-    val pixels = IntArray(bitmap.width * bitmap.height)
-    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-
-    var y = 0
-    while (y < bitmap.height) {
-        var x = 0
-        while (x < bitmap.width) {
-            val color = pixels[y * bitmap.width + x]
-            val r = ((color shr 16) and 0xFF) shr 4
-            val g = ((color shr 8) and 0xFF) shr 4
-            val b = (color and 0xFF) shr 4
-            val luma = (r * 3 + g * 6 + b) / 10
-            if (luma in 2..13) {
-                histogram[r * 256 + g * 16 + b]++
-            }
-            x += stepX
-        }
-        y += stepY
-    }
-
-    var bestIndex = -1
-    var bestCount = 0
-    for (index in histogram.indices) {
-        if (histogram[index] > bestCount) {
-            bestCount = histogram[index]
-            bestIndex = index
-        }
-    }
-    if (bestIndex < 0) return FallbackTint
-
-    val r = ((bestIndex / 256) shl 4) or 8
-    val g = (((bestIndex / 16) % 16) shl 4) or 8
-    val b = ((bestIndex % 16) shl 4) or 8
-    return Color(r, g, b)
-}
-
-private fun blend(base: Color, target: Color, amount: Float): Color = Color(
-    red = base.red + (target.red - base.red) * amount,
-    green = base.green + (target.green - base.green) * amount,
-    blue = base.blue + (target.blue - base.blue) * amount,
-    alpha = 1f,
-)
 
 /**
  * Apple Music style progress: a hairline that thickens while dragging, no
@@ -855,9 +751,10 @@ private fun AppleMusicProgress(
         animationSpec = tween(160),
         label = "progress-bar-height",
     )
-    // 松手后拖动圆点不是瞬间消失，而是跟着进度条一起收细。
+    // 圆点常驻，拖动时只放大一点。以前是"拖动才出现"，停下就看不到播到哪儿了，
+    // 而参考图里进度条上一直有一个点标着当前位置。
     val thumbScale by animateFloatAsState(
-        targetValue = if (dragging) 1f else 0f,
+        targetValue = if (dragging) 1.4f else 1f,
         animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
         label = "progress-thumb",
     )
@@ -867,6 +764,9 @@ private fun AppleMusicProgress(
     Column {
         Canvas(
             modifier = Modifier
+                // padding 在 fillMaxWidth 之前 = 先让出两端，再在剩下的宽度里铺满。
+                // 手势坐标也用这个宽度归一化，所以点到哪儿就是哪儿。
+                .padding(start = ProgressStartInset, end = ProgressEndInset)
                 .fillMaxWidth()
                 .height(26.dp)
                 .pointerInput(durationMs) {
@@ -894,6 +794,22 @@ private fun AppleMusicProgress(
                             onSeek((offset.x / size.width.toFloat() * durationMs).toLong())
                         }
                     }
+                }
+                // The bar is drawn, not a Material Slider, so nothing about it is
+                // exposed to a screen reader by default: without this block TalkBack
+                // reads it as an anonymous canvas and the only way to seek is by
+                // touching a precise x coordinate. `setProgress` is what makes the
+                // accessibility scroll gestures seek instead of scrolling the sheet.
+                .semantics {
+                    progressBarRangeInfo = ProgressBarRangeInfo(shownRatio, 0f..1f)
+                    stateDescription =
+                        "${formatDuration(displayPosition)} / ${formatDuration(durationMs)}"
+                    if (durationMs > 0L) {
+                        setProgress { target ->
+                            onSeek((target.coerceIn(0f, 1f) * durationMs).toLong())
+                            true
+                        }
+                    }
                 },
         ) {
             val height = barHeight.toPx()
@@ -915,19 +831,25 @@ private fun AppleMusicProgress(
                 cornerRadius = corner,
             )
 
-            if (thumbScale > 0f) {
-                drawCircle(
-                    color = OnDark,
-                    radius = height * 1.15f * thumbScale,
-                    center = Offset(playedWidth, centerY),
-                )
-            }
+            // 位置夹进两端：0:00 时圆点不该有一半被屏幕边缘切掉。
+            val thumbRadius = height * 1.15f * thumbScale
+            drawCircle(
+                color = OnDark,
+                radius = thumbRadius,
+                center = Offset(
+                    x = playedWidth.coerceIn(thumbRadius, size.width - thumbRadius),
+                    y = centerY,
+                ),
+            )
         }
 
         Spacer(Modifier.height(2.dp))
 
+        // 时间标签跟着条走：左右两端与进度条首尾对齐，否则"3:47"会探到条的右端之外。
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .padding(start = ProgressStartInset, end = ProgressEndInset)
+                .fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
@@ -950,70 +872,76 @@ private fun PlaybackControls(
     onTogglePlay: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    // Three equal cells instead of a spacer at each end. The play button is then on the
+    // exact centre of the row whatever the cover turns out to be wide — with fixed 40 dp
+    // spacers the row needed 300 dp, so a narrower cover made it overflow and shifted
+    // every control off the centre line.
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Spacer(Modifier.size(40.dp))
-
-        // 深色播放页去掉涟漪，改用按压缩放：手指按下时控件轻微收紧，
-        // 松手回弹，比在黑色背景上铺一层水波更干净。
-        Box(
-            modifier = Modifier
-                .size(68.dp)
-                .noRippleClickable(
-                    role = Role.Button,
-                    pressScale = 0.88f,
-                    onClick = onPrevious,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.SkipPrevious,
-                contentDescription = "上一首",
-                tint = OnDark,
-                modifier = Modifier.size(62.dp),
-            )
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            // 深色播放页去掉涟漪，改用按压缩放：手指按下时控件轻微收紧，
+            // 松手回弹，比在色场上铺一层水波更干净。
+            // 图标尺寸按参考图收小：控件在色场上是"浮着的一排"，不是占满一行的方块。
+            Box(
+                modifier = Modifier
+                    .size(60.dp)
+                    .noRippleClickable(
+                        role = Role.Button,
+                        pressScale = 0.88f,
+                        onClick = onPrevious,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.SkipPrevious,
+                    contentDescription = "上一首",
+                    tint = OnDark,
+                    modifier = Modifier.size(36.dp),
+                )
+            }
         }
 
-        Box(
-            modifier = Modifier
-                .size(84.dp)
-                .clip(CircleShape)
-                .noRippleClickable(
-                    role = Role.Button,
-                    pressScale = 0.90f,
-                    onClick = onTogglePlay,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            AnimatedPlayPauseIcon(
-                isPlaying = isPlaying,
-                tint = OnDark,
-                iconSize = 62.dp,
-            )
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .size(76.dp)
+                    .noRippleClickable(
+                        role = Role.Button,
+                        pressScale = 0.90f,
+                        onClick = onTogglePlay,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                AnimatedPlayPauseIcon(
+                    isPlaying = isPlaying,
+                    tint = OnDark,
+                    iconSize = 48.dp,
+                )
+            }
         }
 
-        Box(
-            modifier = Modifier
-                .size(68.dp)
-                .noRippleClickable(
-                    role = Role.Button,
-                    pressScale = 0.88f,
-                    onClick = onNext,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.SkipNext,
-                contentDescription = "下一首",
-                tint = OnDark,
-                modifier = Modifier.size(62.dp),
-            )
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .size(60.dp)
+                    .noRippleClickable(
+                        role = Role.Button,
+                        pressScale = 0.88f,
+                        onClick = onNext,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.SkipNext,
+                    contentDescription = "下一首",
+                    tint = OnDark,
+                    modifier = Modifier.size(36.dp),
+                )
+            }
         }
-
-        Spacer(Modifier.size(40.dp))
     }
 }

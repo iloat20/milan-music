@@ -26,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
 /**
@@ -44,7 +45,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
     ) {
         val pending = goAsync()
         instanceFlag = true
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        providerScope.launch {
             try {
                 appWidgetIds.forEach { widgetId ->
                     // Per-instance isolation: a failure here escapes into a
@@ -83,7 +84,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
      */
     private fun handleToggle(context: Context) {
         val pending = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
+        providerScope.launch {
             try {
                 runCatching {
                     val app = context.applicationContext as? MilanMusicApp ?: return@runCatching
@@ -92,10 +93,12 @@ class MusicWidgetProvider : AppWidgetProvider() {
                     if (player.state.value.queueSize == 0) {
                         val tracks = app.container.libraryCache.load()
                         if (tracks.isNotEmpty()) {
-                            player.playQueue(tracks, Random.nextInt(tracks.size))
+                            val index = Random.nextInt(tracks.size)
+                            // Controller calls are main-thread bound; see PlayerController.
+                            withContext(Dispatchers.Main) { player.playQueue(tracks, index) }
                         }
                     } else {
-                        player.togglePlayPause()
+                        withContext(Dispatchers.Main) { player.togglePlayPause() }
                     }
                 }.onFailure { Log.w(TAG, "toggle failed", it) }
             } finally {
@@ -252,6 +255,20 @@ class MusicWidgetProvider : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.milan.music.widget.REFRESH"
 
         private const val TAG = "MusicWidget"
+
+        /**
+         * One scope for every broadcast this provider handles.
+         *
+         * `onUpdate` and `handleToggle` used to build their own
+         * `CoroutineScope(SupervisorJob() + ...)` per call — a fresh job tree per
+         * broadcast, owned by nobody and never cancelled, and the two disagreed on the
+         * dispatcher for no stated reason. One process-lifetime scope keeps the work
+         * structured; `goAsync().finish()` in `finally` still bounds each broadcast, and
+         * the process dying is the only way this scope ends, exactly like
+         * `AppContainer.scope`. Work runs on `Default` and hops to `Main` for the
+         * controller calls, which are main-thread bound.
+         */
+        private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         private const val COVER_SIZE = 256
 

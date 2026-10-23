@@ -70,7 +70,18 @@ class PlayerController(
     private var connection: ListenableFuture<MediaController>? = null
     private var progressJob: Job? = null
     private var queue: List<Track> = emptyList()
-    private var pendingAction: (() -> Unit)? = null
+
+    /**
+     * Requests that arrived before the controller finished connecting, in arrival
+     * order.
+     *
+     * A single slot used to hold them, which silently dropped the earlier request:
+     * a widget tap that starts a queue and a row tap landing inside the same connect
+     * window left only the second one, with nothing in the log. The queue replays
+     * them in order instead — a `playQueue` followed by a `togglePlayPause` ends up
+     * exactly where the user left it.
+     */
+    private val pendingActions = ArrayDeque<() -> Unit>()
     private var lastWidgetSnapshot: Pair<Long?, Boolean>? = null
 
     /**
@@ -159,8 +170,13 @@ class PlayerController(
                         mediaController.addListener(listener)
                         refresh()
                         if (mediaController.isPlaying) startProgressLoop()
-                        pendingAction?.invoke()
-                        pendingAction = null
+                        // Replay in request order. Each action sees a non-null
+                        // controller, so none of them can enqueue again. One failure
+                        // must not swallow the actions behind it.
+                        while (pendingActions.isNotEmpty()) {
+                            runCatching { pendingActions.removeFirst().invoke() }
+                                .onFailure { Log.w(TAG, "queued player action failed", it) }
+                        }
                     }
                 }.onFailure {
                     connection = null
@@ -185,7 +201,7 @@ class PlayerController(
         Log.d(TAG, "release: detaching from playback service (queue=${_state.value.queueSize})")
         progressJob?.cancel()
         progressJob = null
-        pendingAction = null
+        pendingActions.clear()
         controller?.removeListener(listener)
         controller?.release()
         controller = null
@@ -228,7 +244,7 @@ class PlayerController(
         if (tracks.isEmpty()) return
         val mediaController = controller
         if (mediaController == null) {
-            pendingAction = { playQueue(tracks, startIndex) }
+            pendingActions.addLast { playQueue(tracks, startIndex) }
             connect()
             return
         }
@@ -256,7 +272,7 @@ class PlayerController(
         if (mediaController == null) {
             // Triggered from the widget before the session is bound: queue the action
             // and let the connection callback replay it.
-            pendingAction = { togglePlayPause() }
+            pendingActions.addLast { togglePlayPause() }
             connect()
             return
         }
