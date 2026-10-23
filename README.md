@@ -49,7 +49,7 @@ Media3 会传递引入 `INTERNET` 与 `ACCESS_NETWORK_STATE`，清单里用 `too
 | 构建 | AGP 9.4.1、Kotlin 2.4.21、Gradle 9.8.2、JDK 17 |
 | 平台 | minSdk 26 / targetSdk 37 / compileSdk 37 |
 
-主代码 40 个 Kotlin 文件、约 8.2k 行；`src/test` 10 个文件、87 个用例。
+主代码 44 个 Kotlin 文件、约 8.4k 行；`src/test` 11 个文件、93 个用例。
 
 ## 构建
 
@@ -114,8 +114,9 @@ app/src/main/java/com/milan/music/
 ## 已知问题
 
 - **播放服务随进程存活**：启动即播意味着队列几乎总是非空，而 `MediaController` 是 bound client——服务不会随 UI 退出而销毁。这是「打开应用就开始放」的代价，不是遗漏；细节见 `PlayerController.onUiStopped` 的 KDoc。
-- **界面文案写在 Compose 里**，未走 `strings.xml`：暂无多语言计划。
-- **只有 JVM 单测，没有 `androidTest`**：`src/test` 覆盖封面几何、取色、缓存预算、倒影阶梯、图标墨色与封面归属共 87 例。布局与手势仍需真机冒烟——第 55 批（叠层照实报高，把信息区全部挤出屏幕）和第 57 批（倒影内容错位，看起来像封面出现了两次）都属于只有 UI 测试才抓得住的那一类。
+- **界面文案统一走 `values/strings.xml`**（1.0.63 起）：代码里不再有中文字面量，`Track` 与 `SortMode` 也不再自带文案——兜底文本由 `ui/text/TrackText.kt` 提供，因为排序与筛选要用**原值**，用显示文本等于让领域层依赖某一种语言。
+- **版本戳在曲库列表末尾**：`1.0.63 (64) · RELEASE`，由 `BuildConfig` 生成。装错包时滚到底就能看出来，不必再靠"体积变没变"推断。
+- **只有 JVM 单测，没有 `androidTest`**：`src/test` 覆盖封面几何、取色、缓存预算、倒影阶梯、图标墨色、封面归属与封面请求时序共 93 例。布局与手势仍需真机冒烟——第 55 批（叠层照实报高，把信息区全部挤出屏幕）和第 57 批（倒影内容错位，看起来像封面出现了两次）都属于只有 UI 测试才抓得住的那一类。
 
 ## 审查与迭代记录
 

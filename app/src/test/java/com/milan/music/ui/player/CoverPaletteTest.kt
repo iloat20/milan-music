@@ -10,26 +10,77 @@ import kotlin.math.abs
 /**
  * 播放页配色的取色规则。
  *
- * 这几条都是"挑两张封面看不出来、换一张就翻车"的类型，所以钉成断言：上半页的颜色
- * 必须来自封面顶边、下半页必须来自封面底边；**色场是封面底部那 20% 色带的算术平均**
- * （不筛暗部、不按彩度加权、不压暗）；顶部仍与色场差一档；纯黑封面要退兜底色而不是
- * 变全黑。
+ * 这几条都是"挑两张封面看不出来、换一张就翻车"的类型，所以钉成断言：
+ *
+ *  - **两段颜色都只来自封面最下 20%**（2026-10-23 用户要求，顶部完全不参与）；
+ *  - **色场是那 20% 色带的算术平均**（不筛暗部、不按彩度加权、不压暗）；
+ *  - 顶部仍与色场差一档；纯黑封面要退兜底色而不是变全黑；
+ *  - 背景渐变在镜面线以下必须真的变暗，且不能暗到与封面脱钩。
  */
 class CoverPaletteTest {
 
     private val size = 48
 
     @Test
-    fun topBandColoursTheHeaderAndBottomBandColoursTheField() {
-        // 顶部深蓝、底部暖橙：如果取色带写错（比如都取整张图的主色），两段会长得一样。
-        val palette = paletteOf(
-            cover(color = Color(0xFF4A4A4A), top = Color(0xFF102040), bottom = Color(0xFFB06018)),
+    fun onlyTheBottomBandColoursThePage() {
+        // 2026-10-23 用户：「播放页取色只取封面最下 20%」。
+        // 两张封面只有**上半部分**不同（一张近黑、一张近白），底部 20% 完全一致：
+        // 推出来的两段色必须逐通道相等。旧实现顶部取封面最上面 10%，这条会立刻红。
+        val darkTop = paletteOf(
+            cover(color = Color(0xFF4A4A4A), top = Color(0xFF0A0A14), bottom = Color(0xFFB06018)),
+            size,
+            size,
+        )
+        val lightTop = paletteOf(
+            cover(color = Color(0xFF4A4A4A), top = Color(0xFFF2F2F2), bottom = Color(0xFFB06018)),
             size,
             size,
         )
 
-        assertTrue("顶部色带没有取自封面顶边（应偏蓝）", palette.top.blue > palette.top.red)
-        assertTrue("色场没有取自封面底边（应偏橙）", palette.bottom.red > palette.bottom.blue)
+        assertEquals("封面顶部改了，页面顶端却跟着变", darkTop.top, lightTop.top)
+        assertEquals("封面顶部改了，色场却跟着变", darkTop.bottom, lightTop.bottom)
+
+        // 顶端与色场都要偏橙（底边是暖橙），谁也不许被上半部分拉走。
+        assertTrue("页面顶端没有取自底部色带（应偏橙）", darkTop.top.red > darkTop.top.blue)
+        assertTrue("色场没有取自底部色带（应偏橙）", darkTop.bottom.red > darkTop.bottom.blue)
+    }
+
+    @Test
+    fun backdropFadesDarkerTowardsTheBottom() {
+        // 「要渐变」的可测形式：镜面线以下必须真的变暗，但也不能暗到与封面脱钩
+        // （那会在屏幕底部出现一条与画面无关的暗带）。
+        val palette = paletteOf(cover(Color(0xFF6E5A44)), size, size)
+        val stops = backdropStopsOf(palette, coverBottom = 0.25f)
+
+        assertEquals("色点数不是 3：渐变退化成平涂", 3, stops.size)
+        assertEquals("镜面线位置被改动了", 0.25f, stops[1].first, 1e-4f)
+        assertEquals("镜面线处不是色场本色", palette.bottom, stops[1].second)
+
+        val field = luminanceOf(stops[1].second)
+        val end = luminanceOf(stops[2].second)
+        assertTrue("页面底端亮度 $end 没有低于色场 $field：下半页还是一块平色", end < field * 0.85f)
+        assertTrue("页面底端亮度 $end 掉到色场的 60% 以下：底部会多出一条与封面无关的暗带", end > field * 0.60f)
+    }
+
+    @Test
+    fun backdropStopsStayOrderedForExtremeCoverHeights() {
+        // 短窗口里 hero 会被压到 MinTransportHeight 附近，coverBottom 可能很小；
+        // location 必须**严格**递增 —— 相等的话 verticalGradient 会画出一条硬边。
+        for (bottom in listOf(0f, 0.02f, 0.25f, 0.6f, 1f, 1.4f)) {
+            val stops = backdropStopsOf(FallbackPalette, bottom)
+            assertTrue(
+                "coverBottom=$bottom 时色点不是严格递增：${stops.map { it.first }}",
+                stops[0].first < stops[1].first && stops[1].first < stops[2].first,
+            )
+        }
+    }
+
+    @Test
+    fun darkenKeepsHueAndOnlyLowersBrightness() {
+        // 渐变靠"同一块颜色暗下去"，不是"往灰里推"：色相方向必须保持。
+        val cool = darken(Color(0xFF2F4A6B), 0.7f)
+        assertTrue("变暗后蓝色不再是主导通道", cool.blue > cool.red + 0.05f)
+        assertTrue("变暗没有真的降低亮度", luminanceOf(cool) < luminanceOf(Color(0xFF2F4A6B)))
     }
 
     @Test
@@ -88,6 +139,10 @@ class CoverPaletteTest {
     @Test
     fun nearWhiteCoverIsCappedSoThePageIsNotBlank() {
         // 兜底安全线：封面底部接近纯白时整页会变成一张白纸，压回 0.5。
+        //
+        // 容差 0.005 不是"放水"：`Color(red, green, blue)` 的三个 Float 通道在 Compose 里
+        // 存成 8 bit sRGB，187.5/255 会被取整成 188/255，亮度因此必然带 ±0.004 的量化误差。
+        // 目标是"不许变成白纸"（那会是 0.95），0.503 与 0.500 在屏幕上是同一块色。
         val field = paletteOf(
             cover(Color(0xFFFDFDFD), bottom = Color(0xFFFAFAFA)),
             size,
@@ -96,7 +151,7 @@ class CoverPaletteTest {
 
         assertTrue(
             "近白封面的色场亮度 ${luminanceOf(field)} 没有兜住，整页会是一张白纸",
-            luminanceOf(field) <= 0.50f + 1e-3f,
+            luminanceOf(field) <= 0.505f,
         )
     }
 
@@ -192,7 +247,9 @@ class CoverPaletteTest {
         return pixels
     }
 
-    private data class Sample(val name: String, val pixels: IntArray)    private fun samples(): List<Sample> = listOf(
+    private data class Sample(val name: String, val pixels: IntArray)
+
+    private fun samples(): List<Sample> = listOf(
         Sample(
             "深蓝封面",
             cover(

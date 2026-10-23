@@ -26,17 +26,14 @@ data class Track(
      */
     val dateModified: Long = 0L,
 ) {
-    val displayTitle: String
-        get() = title.ifBlank { "未知曲目" }
-
-    val displayArtist: String
-        get() = artist.takeIf { it.isNotBlank() && it != UNKNOWN } ?: "未知艺人"
-
-    val displayAlbum: String
-        get() = album.takeIf { it.isNotBlank() && it != UNKNOWN } ?: "未知专辑"
-
     companion object {
-        private const val UNKNOWN = "<unknown>"
+        /**
+         * MediaStore 的哨兵值：行扫描到了，但这个字段读不出来。
+         *
+         * 它只表示"缺失"，不表示"该怎么显示" —— 兜底文案属于界面，见
+         * `ui/text/TrackText.kt`。放在这里是因为筛选与排序也要认这个值。
+         */
+        const val UNKNOWN = "<unknown>"
     }
 }
 
@@ -46,14 +43,4 @@ enum class SortMode {
     ALBUM,
     DATE_ADDED,
     DURATION,
-    ;
-
-    val label: String
-        get() = when (this) {
-            TITLE -> "标题"
-            ARTIST -> "艺人"
-            ALBUM -> "专辑"
-            DATE_ADDED -> "最近添加"
-            DURATION -> "时长"
-        }
 }

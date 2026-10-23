@@ -362,6 +362,16 @@ internal fun CoverReflection(
         }
 
         // 由远到近：最糊的先画。近处那几级的包络在镜面线附近才满值，后画才盖得住。
+        //
+        // 循环里调 `remember` **合法但脆**：`remember` 认的是 slot table 里的位置，
+        // 也就是"第几次被调用"，不是源码里的变量名。这里成立靠两个前提，改任何一条
+        // 都要重新查一遍：
+        //  1. [BlurRamp] 是顶层 `val`，长度恒为 6 —— 循环上界不依赖运行时状态，
+        //     所以每一趟组合走的迭代序列完全相同，slot 不会错位；
+        //  2. `index` 与 `height` 都进了 key —— 高度变化（旋转、分屏）时包络重算，
+        //     不会把旧高度下算好的 alpha 拿去用。
+        // 反例：把 `BlurRamp` 改成由参数传入、或长度随屏幕变化的 list，第 n 层的
+        // mask 会被第 n+1 层复用，阶梯直接串色 —— 而且只在部分设备上出现。
         for (index in BlurRamp.lastIndex downTo 1) {
             val stop = BlurRamp[index]
             val alphas = remember(index, height) { maskAlphas(index, height) }

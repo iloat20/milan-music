@@ -6,13 +6,21 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.milan.music.BuildConfig
+import com.milan.music.R
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
 import com.milan.music.ui.components.EmptyState
@@ -31,6 +39,7 @@ fun SongsList(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     isLoading: Boolean = false,
+    showBuildStamp: Boolean = false,
 ) {
     if (tracks.isEmpty()) {
         // A first launch paints an empty library for as long as the MediaStore scan
@@ -38,15 +47,15 @@ fun SongsList(
         if (isLoading) {
             EmptyState(
                 icon = Icons.Rounded.LibraryMusic,
-                title = "正在扫描音乐库",
-                message = "首次启动需要读取设备上的音频文件，请稍候。",
+                title = stringResource(R.string.library_scanning_title),
+                message = stringResource(R.string.library_scanning_body),
                 modifier = modifier,
             )
         } else {
             EmptyState(
                 icon = Icons.Rounded.LibraryMusic,
-                title = "这里还没有歌曲",
-                message = "把音频文件放到手机的 Music 目录，或稍后重新扫描音乐库。",
+                title = stringResource(R.string.library_empty_title),
+                message = stringResource(R.string.library_empty_body),
                 modifier = modifier,
             )
         }
@@ -76,5 +85,34 @@ fun SongsList(
                 ),
             )
         }
+        // 只在曲库页出现。两个页签共用这一个列表，不设开关的话喜欢页也会滚出一行
+        // 版本号 —— 那是调试信息，不该出现在"我喜欢的东西"列表底部。
+        if (showBuildStamp) {
+            item(key = "build-stamp") {
+                BuildStamp()
+            }
+        }
     }
+}
+
+/**
+ * 列表末尾的版本戳，`1.0.63 (64) · RELEASE`。
+ *
+ * 存在的唯一理由是可辨认：这个工程每批都要打测试包，debug 包带 `.debug` 后缀、装出来是
+ * 第二个图标，历史上为了确认"装的到底是哪个包"耗掉过整轮排查。放在列表末尾而不是顶栏，
+ * 是为了不进首屏构图 —— 滚到底才出现；并且**只挂在曲库页**（`showBuildStamp`），
+ * 喜欢页不显示。
+ */
+@Composable
+private fun BuildStamp() {
+    Text(
+        text = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · " +
+            if (BuildConfig.DEBUG) "DEBUG" else "RELEASE",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.38f),
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 18.dp, bottom = 6.dp),
+    )
 }

@@ -159,9 +159,11 @@ class PlayerController(
                     runCatching { future.get().release() }
                     return@addListener
                 }
-                // The whole body stays inside runCatching: a throwing getter or
-                // listener call would otherwise escape into the main executor.
-                runCatching {
+                // Explicit try/catch instead of runCatching: this body makes a dozen
+                // calls into Media3, and collapsing them into one Throwable says
+                // nothing about which one failed. The catch stays broad on purpose —
+                // anything escaping a main-executor listener takes the process down.
+                try {
                     future.get().also { mediaController ->
                         controller = mediaController
                         // The future is complete; keeping it would make
@@ -178,7 +180,10 @@ class PlayerController(
                                 .onFailure { Log.w(TAG, "queued player action failed", it) }
                         }
                     }
-                }.onFailure {
+                } catch (e: Exception) {
+                    // Includes the case where release() cancelled the future while it
+                    // was still connecting; there is no controller to install then.
+                    Log.w(TAG, "session connect failed", e)
                     connection = null
                 }
             },

@@ -21,7 +21,9 @@ import androidx.core.graphics.createBitmap
 import com.milan.music.MainActivity
 import com.milan.music.MilanMusicApp
 import com.milan.music.R
+import com.milan.music.data.media.softwareCopy
 import com.milan.music.data.model.Track
+import com.milan.music.ui.text.titleText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -121,7 +123,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
         if (track != null) {
             val cover = coverFor(context, track, cardCornerRadiusPx(manager, widgetId))
             if (cover != null) views.setImageViewBitmap(R.id.widget_cover, cover)
-            views.setTextViewText(R.id.widget_title, track.displayTitle)
+            views.setTextViewText(R.id.widget_title, track.titleText(context))
         } else {
             views.setTextViewText(R.id.widget_title, context.getString(R.string.app_name))
         }
@@ -176,7 +178,10 @@ class MusicWidgetProvider : AppWidgetProvider() {
         val key = coverKey(track.albumId, radiusPx)
         coverCache.get(key)?.let { return it }
         val app = context.applicationContext as? MilanMusicApp ?: return null
-        val bitmap = app.container.artwork.load(track)?.asAndroidBitmap() ?: return null
+        // 512 px 而不是 192 px 的列表缩略图：目标是 256 px 的卡片封面，用缩略图
+        // 就是 1.33 倍放大，描边和文字都糊。这里宁可多解一次再缩下来。
+        val bitmap = app.container.artwork.loadPlayerArtwork(track)?.asAndroidBitmap()
+            ?: return null
         return runCatching { roundedCover(bitmap, COVER_SIZE, radiusPx) }
             .onFailure { Log.w(TAG, "cover render failed for album ${track.albumId}", it) }
             .getOrNull()
@@ -211,11 +216,8 @@ class MusicWidgetProvider : AppWidgetProvider() {
      * the same outcome as missing artwork.
      */
     private fun roundedCover(source: Bitmap, size: Int, radiusPx: Float): Bitmap? {
-        val drawable = if (source.config == Bitmap.Config.HARDWARE) {
-            source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
-        } else {
-            source
-        }
+        // 取可读像素的副本；换不出来就返回 null，与"没有封面"走同一条占位图路径。
+        val drawable = source.softwareCopy() ?: return null
         val output = createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)

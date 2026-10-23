@@ -6,6 +6,17 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
+/**
+ * 全应用的字号节奏。
+ *
+ * 只覆盖**真被 UI 引用的档位**（`grep "typography\."` 能对上的那些）；没覆盖的档位
+ * 走 Material 默认值 —— 那是刻意的：没有调用点就没有节奏可言，凭空补一条只会让人
+ * 以为它生效了。
+ *
+ * [headlineSmall] 是个例外：它的值与 M3 默认**逐字段相同**，补进来纯粹是为了让
+ * "播放页歌名"这一档在 Type.kt 里可见。想调歌名的字号，改这里的同时会撞上
+ * `TypographyRhythmTest` —— 那条测试守的正是"补齐不等于改视觉"。
+ */
 val MilanTypography = Typography(
     displaySmall = TextStyle(
         fontFamily = FontFamily.Default,
@@ -20,6 +31,13 @@ val MilanTypography = Typography(
         fontSize = 24.sp,
         lineHeight = 30.sp,
         letterSpacing = (-0.4).sp,
+    ),
+    headlineSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+        letterSpacing = 0.sp,
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,

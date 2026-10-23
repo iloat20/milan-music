@@ -37,11 +37,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.ScaleFactor
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.milan.music.R
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
 import com.milan.music.play.PlayerController
@@ -400,6 +402,10 @@ internal fun CoverCarousel(
         val latestPages by rememberUpdatedState(pages)
         val latestLaunchSwitch by rememberUpdatedState(launchSwitch)
 
+        // 无障碍动作名要在组合作用域里读：`semantics {}` 的 lambda 不是 @Composable。
+        val nextLabel = stringResource(R.string.cd_next)
+        val previousLabel = stringResource(R.string.cd_previous)
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -467,11 +473,11 @@ internal fun CoverCarousel(
                 // a visible affordance the design does not have.
                 .semantics {
                     customActions = listOf(
-                        CustomAccessibilityAction("下一首") {
+                        CustomAccessibilityAction(nextLabel) {
                             latestLaunchSwitch(true)
                             true
                         },
-                        CustomAccessibilityAction("上一首") {
+                        CustomAccessibilityAction(previousLabel) {
                             latestLaunchSwitch(false)
                             true
                         },

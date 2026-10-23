@@ -16,11 +16,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.scale
 import androidx.core.net.toUri
 import com.milan.music.data.model.Track
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -43,6 +41,11 @@ import kotlin.math.roundToInt
  * albumId, differing embedded art per file) shows the first decoded cover for all
  * its tracks — the legacy API 26-28 path is album-keyed by design anyway, so this
  * matches its semantics.
+ *
+ * All four lookups share one request pipeline: a cache hit returns without suspending,
+ * concurrent requests for the same album are merged into one decode, and a producer
+ * cancelled mid-decode defers to whatever it already cached. That pipeline is
+ * [MemoCache] — it exists once rather than four times, and `MemoCacheTest` pins it.
  */
 class ArtworkRepository(private val context: Context) {
 
@@ -114,37 +117,24 @@ class ArtworkRepository(private val context: Context) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
-    /** De-duplicates concurrent requests for the same album while scrolling fast. */
-    private val pending = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
-    private val pendingPlayer = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
-    private val pendingBackdrop = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
-    private val pendingReflection = ConcurrentHashMap<Long, CompletableDeferred<ImageBitmap?>>()
+    /**
+     * 四个缓存各自的一次「查缓存 → 合并并发请求 → 解码」，见 [MemoCache]。
+     *
+     * 声明在缓存之后：`peek` 捕获上面对应的 `LruCache`，属性按声明顺序初始化。
+     */
+    private val listMemo = MemoCache<Long, ImageBitmap>(peek = { cache.get(it)?.asImageBitmap() })
+    private val playerMemo =
+        MemoCache<Long, ImageBitmap>(peek = { playerCache.get(it)?.asImageBitmap() })
+    private val backdropMemo =
+        MemoCache<Long, ImageBitmap>(peek = { backdropCache.get(it)?.asImageBitmap() })
+    private val reflectionMemo =
+        MemoCache<Long, ImageBitmap>(peek = { reflectionCache.get(it)?.asImageBitmap() })
 
-    suspend fun load(track: Track): ImageBitmap? {
-        cache.get(track.albumId)?.let { return it.asImageBitmap() }
-
-        val own = CompletableDeferred<ImageBitmap?>()
-        pending.putIfAbsent(track.albumId, own)?.let { inFlight ->
-            // A producer cancelled mid-decode completes its deferred with `null`, and
-            // its `finally` has already removed the map entry: awaiting alone would
-            // then report "no artwork" for a row that simply scrolled out of
-            // composition, and this row never retries (its LaunchedEffect keys did not
-            // change). Re-reading the cache covers the producer that finished the
-            // decode after the caller was cancelled. Same reasoning as
-            // [loadPlayerArtwork].
-            return inFlight.await() ?: cache.get(track.albumId)?.asImageBitmap()
-        }
-
-        var result: ImageBitmap? = null
-        try {
-            val decoded = withContext(Dispatchers.IO) { decodeBitmap(track, LIST_THUMB_SIZE) }
-            if (decoded != null) cache.put(track.albumId, decoded)
-            result = decoded?.asImageBitmap()
-            return result
-        } finally {
-            pending.remove(track.albumId)
-            own.complete(result)
-        }
+    /** Row thumbnails for the library list, at [LIST_THUMB_SIZE]. */
+    suspend fun load(track: Track): ImageBitmap? = listMemo.load(track.albumId) { albumId ->
+        val decoded = withContext(Dispatchers.IO) { decodeBitmap(track, LIST_THUMB_SIZE) }
+        if (decoded != null) cache.put(albumId, decoded)
+        decoded?.asImageBitmap()
     }
 
     /**
@@ -155,35 +145,18 @@ class ArtworkRepository(private val context: Context) {
      * the bitmap itself. The trimmed result is cached — re-entering the player or
      * switching tracks within one album must not re-decode and re-scan 512×512 px.
      */
-    suspend fun loadPlayerArtwork(track: Track): ImageBitmap? {
-        playerCache.get(track.albumId)?.let { return it.asImageBitmap() }
-
-        val own = CompletableDeferred<ImageBitmap?>()
-        pendingPlayer.putIfAbsent(track.albumId, own)?.let { inFlight ->
-            // The producer can be cancelled mid-decode: the cover carousel cancels
-            // the outgoing page's effect exactly when that artwork becomes the
-            // current one. Re-check the cache the producer may have filled anyway.
-            return inFlight.await() ?: playerCache.get(track.albumId)?.asImageBitmap()
-        }
-
-        var result: ImageBitmap? = null
-        try {
-            // The decoded bitmap is the hand-off between the neighbouring page and
-            // the page that replaces it, so it must survive cancellation of the
-            // caller. Keep the put inside the non-cancellable block: the caller can
-            // be cancelled on the way out of `withContext`, before the line below.
-            val decoded = withContext(Dispatchers.IO + NonCancellable) {
+    suspend fun loadPlayerArtwork(track: Track): ImageBitmap? =
+        playerMemo.load(track.albumId) { albumId ->
+            // 解码结果是相邻页与替换页之间的交接物，所以必须活过调用方的取消：
+            // 调用的那一方（轮播里退场的页）恰好在这张封面成为当前页时被取消。
+            // 把 `put` 一起放进 NonCancellable —— 取消可以在 `withContext` 返回途中
+            // 触发，落在 put 之前，那时缓存还是空的，等待方就会拿到 null。
+            withContext(Dispatchers.IO + NonCancellable) {
                 decodeBitmap(track, PLAYER_THUMB_SIZE)?.let(::trimLightMargins)?.also {
-                    playerCache.put(track.albumId, it)
+                    playerCache.put(albumId, it)
                 }
-            }
-            result = decoded?.asImageBitmap()
-            return result
-        } finally {
-            pendingPlayer.remove(track.albumId)
-            own.complete(result)
+            }?.asImageBitmap()
         }
-    }
 
     /**
      * Small thumbnail used as the player backdrop, cached per album.
@@ -194,27 +167,12 @@ class ArtworkRepository(private val context: Context) {
      * even when nothing changed; the dominant-colour scan still repeats, but the
      * ContentResolver round trip and the decode no longer do.
      */
-    suspend fun loadBackdrop(track: Track): ImageBitmap? {
-        backdropCache.get(track.albumId)?.let { return it.asImageBitmap() }
-
-        val own = CompletableDeferred<ImageBitmap?>()
-        pendingBackdrop.putIfAbsent(track.albumId, own)?.let { inFlight ->
-            // See [load]: a cancelled producer answers `null`, so the cache is the
-            // second source of truth before reporting "no backdrop".
-            return inFlight.await() ?: backdropCache.get(track.albumId)?.asImageBitmap()
-        }
-
-        var result: ImageBitmap? = null
-        try {
+    suspend fun loadBackdrop(track: Track): ImageBitmap? =
+        backdropMemo.load(track.albumId) { albumId ->
             val decoded = withContext(Dispatchers.IO) { decodeBitmap(track, BACKDROP_SIZE) }
-            if (decoded != null) backdropCache.put(track.albumId, decoded)
-            result = decoded?.asImageBitmap()
-            return result
-        } finally {
-            pendingBackdrop.remove(track.albumId)
-            own.complete(result)
+            if (decoded != null) backdropCache.put(albumId, decoded)
+            decoded?.asImageBitmap()
         }
-    }
 
     /**
      * Vertically flipped cover, for the player's reflection band under the artwork.
@@ -227,18 +185,8 @@ class ArtworkRepository(private val context: Context) {
      * The flip works on pixels rather than a `Matrix` so [reflectRows] stays a plain
      * function that unit tests can drive without a device.
      */
-    suspend fun loadReflection(track: Track): ImageBitmap? {
-        reflectionCache.get(track.albumId)?.let { return it.asImageBitmap() }
-
-        val own = CompletableDeferred<ImageBitmap?>()
-        pendingReflection.putIfAbsent(track.albumId, own)?.let { inFlight ->
-            // Same cancellation caveat as [load]: a producer cancelled mid-decode
-            // answers `null`, so re-read the cache before reporting "no reflection".
-            return inFlight.await() ?: reflectionCache.get(track.albumId)?.asImageBitmap()
-        }
-
-        var result: ImageBitmap? = null
-        try {
+    suspend fun loadReflection(track: Track): ImageBitmap? =
+        reflectionMemo.load(track.albumId) { albumId ->
             val source = loadPlayerArtwork(track)
             // `Modifier.blur` is an API 31 RenderEffect; below that the reflection can
             // only be softened by its own resolution, so the bitmap is stored tiny.
@@ -247,19 +195,12 @@ class ArtworkRepository(private val context: Context) {
             } else {
                 REFLECTION_LEGACY_SIZE
             }
-            val flipped = if (source == null) {
-                null
-            } else {
-                withContext(Dispatchers.IO) { reflectionOf(source, targetWidth) }
+            val flipped = source?.let {
+                withContext(Dispatchers.IO) { reflectionOf(it, targetWidth) }
             }
-            if (flipped != null) reflectionCache.put(track.albumId, flipped)
-            result = flipped?.asImageBitmap()
-            return result
-        } finally {
-            pendingReflection.remove(track.albumId)
-            own.complete(result)
+            if (flipped != null) reflectionCache.put(albumId, flipped)
+            flipped?.asImageBitmap()
         }
-    }
 
     fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
 
@@ -424,17 +365,9 @@ class ArtworkRepository(private val context: Context) {
      * least [MIN_KEEP_FRACTION] of the original area in both axes.
      */
     private fun trimLightMargins(source: Bitmap): Bitmap {
-        // getPixels() throws on a HARDWARE bitmap and MediaProvider may return one, so
-        // the pixel reads below would abort the coroutine. The copy costs one readback
-        // per album (the result is cached) and keeps every later consumer legal too.
-        val image = source.softwareCopy()
-        // `softwareCopy()` falls back to the HARDWARE bitmap itself when `copy()`
-        // returns null (memory pressure). Every pixel call below would then throw, and
-        // it would do so inside the caller's NonCancellable block, where nothing in
-        // this file catches it — the exception would reach the recomposer and take the
-        // process down. Untrimmed artwork is the correct degradation: same cover, with
-        // the pale margins left in.
-        if (image.config == Bitmap.Config.HARDWARE) return image
+        // 读不到像素就跳过修剪：同一张封面，只是浅色边距留着。也不能让它抛 ——
+        // 这段跑在调用方的 NonCancellable 块里，异常会一路到 recomposer。
+        val image = source.softwareCopy() ?: return source
         val width = image.width
         val height = image.height
         if (width < 32 || height < 32) return image
@@ -495,11 +428,7 @@ class ArtworkRepository(private val context: Context) {
      * exception would reach the recomposer. `null` degrades to the flat colour field.
      */
     private fun reflectionOf(source: ImageBitmap, targetWidth: Int): Bitmap? = runCatching {
-        val software = source.asAndroidBitmap().softwareCopy()
-        if (software.config == Bitmap.Config.HARDWARE) {
-            Log.w(TAG, "reflection skipped: artwork pixels are unavailable (HARDWARE)")
-            return@runCatching null
-        }
+        val software = source.asAndroidBitmap().softwareCopy() ?: return@runCatching null
         val scaled = if (software.width > targetWidth) {
             val ratio = targetWidth.toFloat() / software.width
             software.scale(
@@ -522,25 +451,6 @@ class ArtworkRepository(private val context: Context) {
     }.onFailure {
         Log.w(TAG, "reflection flip failed for ${source.width}px artwork", it)
     }.getOrNull()
-
-    /**
-     * Returns a bitmap whose pixels are readable from Java.
-     *
-     * `Bitmap.Config.HARDWARE` (API 26+) keeps pixels in graphics memory: `getPixels`
-     * throws `IllegalStateException` on it. MediaProvider may hand one back from
-     * `loadThumbnail`, and nothing in the type system says which it chose.
-     */
-    private fun Bitmap.softwareCopy(): Bitmap =
-        if (config == Bitmap.Config.HARDWARE) {
-            copy(Bitmap.Config.ARGB_8888, false) ?: run {
-                // Returning the hardware bitmap keeps the caller alive; `trimLightMargins`
-                // checks for that case and skips the trim instead of reading pixels.
-                Log.w(TAG, "software copy of a HARDWARE bitmap failed; trim skipped")
-                this
-            }
-        } else {
-            this
-        }
 
     private fun albumArtUri(albumId: Long): Uri =
         ContentUris.withAppendedId(

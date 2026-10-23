@@ -1,23 +1,23 @@
 package com.milan.music.ui.player
 
-import android.graphics.Bitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
+import com.milan.music.data.media.softwareCopy
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
- * 播放页的两段配色，分别取自封面的最上面和最下面那一条。
+ * 播放页的两段配色，**都取自封面最下面那 20%**。
  *
  * 这两个颜色是**取自封面的本色**，不压暗、不提饱和：只有颜色真的等于封面上那条色带，
  * 眼睛才能验证"背景色是从封面取的"。浅色封面因此得到浅色下半页，深色封面得到深色
  * 下半页 —— 白字在浅色封面上会发灰，这是这个选择已知的代价。
  *
- *  - [top]：页面顶端那条色带（封面贴上缘淡出后露出来的就是它）；
- *  - [bottom]：封面下方整块色场，标题、进度条、控制都压在上面。
+ *  - [top]：同一条色带的**上段**（80%–88%），页面顶端淡出后露出来的就是它；
+ *  - [bottom]：整条色带（80%–100%）的平均色，镜面线以下的色场从它开始往下渐暗。
  *
  * 唯一的加工是 [TOP_VS_FIELD]：顶部按色场压一档，"上下两段的颜色不一样"才成立；再加
  * 两条亮度安全上限，避免一张近白封面把整页变成白纸。
@@ -28,15 +28,39 @@ internal data class PlayerPalette(
 )
 
 /**
- * 取色带：封面最上面 10%，最下面 20%。
+ * 取色带：**只有封面最下面 20%**，页面顶端与色场都从这一条里出。
  *
  * 底边取到 20%，是因为最底下那一窄条几乎总是"别的东西"：版权条、渐变压暗、边缘暗角，
  * 它和眼睛在封面上看到的那个色块不是一回事。取 10% 等于把那一窄条当成整块底色；
  * 20% 把它一起平均进去，结果才接近"封面的下缘看起来是什么颜色"。再往上取就会把
  * 封面主体拉进色场，那又变成"整张图的主色"了。
  */
-private const val TOP_BAND_END = 0.10f
-private const val BOTTOM_BAND_START = 0.80f
+internal const val BOTTOM_BAND_START = 0.80f
+
+/**
+ * 页面顶端那一条的颜色，取自**同一条色带的上段**（80%–88%），不再碰封面顶部。
+ *
+ * 2026-10-23 用户：「播放页取色只取封面最下 20%」。旧实现顶部取封面最上面 10%，
+ * 好处是页面顶端与封面顶缘同色，代价是页面被两处取色源拉扯 —— 一张上白下黑的封面，
+ * 顶端白、色场黑，中间那条过渡只能靠渐变硬接。只在一条色带里取，上下天然同源。
+ *
+ * 上段仍然按 [TOP_VS_FIELD] 压一档，所以"上下两段不一样"这条版式要求没有丢：
+ * 顶端的暗是**同一条色带内的暗**，不是另一个色相。
+ */
+private const val TOP_BAND_START = BOTTOM_BAND_START
+private const val TOP_BAND_END = 0.88f
+
+/**
+ * 页面底端的压暗系数：从镜面线往下，色场再暗一档。
+ *
+ * 存在的理由是"渐变"必须**任何封面都看得见**。色带自身的纵向差可能接近 0（纯色封面、
+ * 大面积平涂的封面），只靠色带内的色差，下半页就是一块死色 —— 那正是用户说的
+ * "要渐变"。这一档是线性亮度乘系数，色相与彩度比不变，等于同一块颜色往下暗下去。
+ *
+ * 0.70 是"看得出在变暗、但不至于读成另一块色"的位置：再低，浅色封面会在屏幕底部
+ * 出现一条与封面无关的暗带。
+ */
+private const val FIELD_FALLOFF = 0.70f
 
 /**
  * 顶部色带相对色场的亮度上限。
@@ -72,9 +96,10 @@ internal val FallbackPalette = PlayerPalette(
 internal fun paletteOf(pixels: IntArray, width: Int, height: Int): PlayerPalette {
     if (width <= 0 || height <= 0 || pixels.size < width * height) return FallbackPalette
 
-    // 只读最上和最下那两条色带。整张图的主色不行：封面中间往往是主体，和顶边、
-    // 底边是两种颜色，用它会在封面边缘留下一条接不上的色带。
-    val topSample = bandColorOf(pixels, width, height, 0f, TOP_BAND_END)
+    // 两条色带都在封面最下面那 20% 里，只是上下段不同：整条的平均色给出色场，
+    // 上段给出页面顶端。**整张图的主色不行**：封面中间往往是主体，和底缘是两种颜色，
+    // 用它会在封面边缘留下一条接不上的色带；封面顶部同样不行，那是另一个光源。
+    val topSample = bandColorOf(pixels, width, height, TOP_BAND_START, TOP_BAND_END)
         ?: dominantColorOf(pixels, width, height)
         ?: return FallbackPalette
     val bottomSample = bandColorOf(pixels, width, height, BOTTOM_BAND_START, 1f)
@@ -101,15 +126,11 @@ internal fun paletteOf(pixels: IntArray, width: Int, height: Int): PlayerPalette
  * palette"要避免的东西。
  *
  * `getPixels()` 在 `Bitmap.Config.HARDWARE` 上会抛异常，而 `loadThumbnail` 完全可能返回
- * 一张 HARDWARE 位图 —— 所以这里先取软件副本。只有 96 px 的缩略图会走到这条路。
+ * 一张 HARDWARE 位图 —— 所以先经 [softwareCopy] 换一张可读的。只有 96 px 的缩略图会走到
+ * 这条路；换不出来同样返回 `null`。
  */
 internal fun paletteOfBitmap(image: ImageBitmap): PlayerPalette? {
-    val source = image.asAndroidBitmap()
-    val bitmap = if (source.config == Bitmap.Config.HARDWARE) {
-        source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
-    } else {
-        source
-    }
+    val bitmap = image.asAndroidBitmap().softwareCopy() ?: return null
     if (bitmap.width <= 0 || bitmap.height <= 0) return null
     val pixels = IntArray(bitmap.width * bitmap.height)
     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
@@ -248,6 +269,51 @@ private fun meanOf(
 }
 
 /**
+ * 整页背景的三个色点：页面顶端 → 镜面线 → 页面底端。
+ *
+ * 这是播放页背景**唯一的配方**，绘制与测试读的是同一个函数，所以"底端比镜面线更暗"
+ * 这类要求能钉成断言，而不是靠改一层再改一层去凑。
+ *
+ *  - 第一段（0 → 镜面线）：封面底缘到页面顶端的过渡。它大部分被封面盖住，只有上缘
+ *    淡出的那一段露出来，所以两端的色差只需要"存在"，不需要很大；
+ *  - 第二段（镜面线 → 底端）：色场往下暗一档，见 [FIELD_FALLOFF]。
+ *
+ * 镜面线位置夹在 [MIRROR_LINE_MIN]..[MIRROR_LINE_MAX] 里：屏幕比例极端时
+ * `heroHeight / pageHeight` 仍会落在这个区间，但夹一次可以保证三个色点严格递增
+ * （`Brush.verticalGradient` 要求 location 升序，相等会画出一条硬边）。
+ */
+internal fun backdropStopsOf(
+    palette: PlayerPalette,
+    coverBottom: Float,
+): List<Pair<Float, Color>> {
+    val mirrorLine = coverBottom.coerceIn(MIRROR_LINE_MIN, MIRROR_LINE_MAX)
+    return listOf(
+        0f to palette.top,
+        mirrorLine to palette.bottom,
+        1f to darken(palette.bottom, FIELD_FALLOFF),
+    )
+}
+
+/** 镜面线（封面底边）在整页里的位置区间 —— 见 [backdropStopsOf]。 */
+private const val MIRROR_LINE_MIN = 0.10f
+private const val MIRROR_LINE_MAX = 0.92f
+
+/**
+ * 在**线性**空间里把三个通道乘同一个系数：色相与彩度比不变，只是整体变暗。
+ *
+ * 不在 sRGB 里乘，是因为那样会把暗部压脏（同样的比例，暗部丢掉的信息更多）。
+ * [shade] 压亮度上限走的是同一条路，两者共用这里。
+ */
+internal fun darken(color: Color, factor: Float): Color {
+    val k = factor.coerceIn(0f, 1f)
+    return Color(
+        red = linearToSrgb(srgbToLinear(color.red) * k),
+        green = linearToSrgb(srgbToLinear(color.green) * k),
+        blue = linearToSrgb(srgbToLinear(color.blue) * k),
+    )
+}
+
+/**
  * 把颜色压到目标亮度上限之内。
  *
  * 默认行为是"原样返回"—— 只有超过上限才动手。动手时在**线性**空间里对三个通道乘同
@@ -267,11 +333,7 @@ private fun shade(color: Color, minLuminance: Float, maxLuminance: Float): Color
     }
 
     val factor = ceiling / luminance
-    return Color(
-        red = linearToSrgb(srgbToLinear(color.red) * factor),
-        green = linearToSrgb(srgbToLinear(color.green) * factor),
-        blue = linearToSrgb(srgbToLinear(color.blue) * factor),
-    )
+    return darken(color, factor)
 }
 
 /** 相对亮度（WCAG 2.1 定义），0 = 黑、1 = 白。 */

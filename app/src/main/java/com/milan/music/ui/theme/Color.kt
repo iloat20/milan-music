@@ -39,10 +39,6 @@ val Moonlight = Color(0xFFF8F1E2)
 //
 // 所以 tint 用库的默认值 Transparent，不再声明。
 
-
-val Sheen = Color(0x40FFF4D8)
-val HairlineGold = Color(0x40C8A550)
-
 /** Liked / favourite accent — iOS system red, readable on both light and dark surfaces. */
 val LikedRed = Color(0xFFFF3B30)
 
@@ -86,12 +82,18 @@ internal data class HomeBackdrop(
  *
  * 光晕换成浅香槟（`F2E4C2 / ECDCB4 / E5D3A8`）而不是原来的 `Amber`：
  * `BE9743` 这种深金压在近白底上会沉成一块土黄，与"更淡"直接冲突。
+ *
+ * 2026-10-23 用户又说「背景色可以再暗点」，方向与上一条相反。选的是"再暗一档"：
+ * **线性亮度整体乘 0.94**（色相与彩度比不变，所以不会往灰里推），三段
+ * `F7EDD3/FBF4E4/FDFAF2 → F0E7CD/F4EDDE/F6F3EB`，顶部亮度 0.851 → 0.801、
+ * 首末差 0.106 → 0.096（渐变仍在）、均亮 0.905 → 0.850。
+ * 光晕**没动**：这一档的观感差别来自底色本身，同步压光晕会同时削弱玻璃可折射的高频。
  */
 internal val LightHomeBackdrop = HomeBackdrop(
     stops = listOf(
-        0.00f to Color(0xFFF7EDD3),
-        0.55f to Color(0xFFFBF4E4),
-        1.00f to Color(0xFFFDFAF2),
+        0.00f to Color(0xFFF0E7CD),
+        0.55f to Color(0xFFF4EDDE),
+        1.00f to Color(0xFFF6F3EB),
     ),
     glows = listOf(
         HomeGlow(Color(0xFFF2E4C2), 0.36f, 0.16f, 0.10f, 0.80f),
@@ -110,12 +112,17 @@ internal val LightHomeBackdrop = HomeBackdrop(
  * 现在把金色收进上半页、光晕换成深金（`8A6C2A / 7A5F22 / 6B521E`）并降到 18%/15%/13%：
  * 整屏平均 (33,25,11)，顶部亮度 0.0126、底部 0.0038 —— 暗一档半，且明度差 15 级，
  * 渐变清晰。深色下的 `Moonlight` 文字对比反而更高，不是牺牲可读性换来的。
+ *
+ * 2026-10-23「再暗点」：与浅色同时收紧，深色这一档的系数是 **0.85**（深色更吃压，
+ * 0.94 在这个亮度区间只有 1~2 级差、肉眼读不出来）。三段 → `231A0C/171107/0E0A05`，
+ * 顶部 0.0132 → 0.0112、首末差 0.0080（仍在，未塌成平涂）、均亮 0.0090 → 0.0068。
+ * 没有压得更狠是因为再往下金色会先消失，整屏退化成纯黑，光晕也就白叠了。
  */
 internal val DarkHomeBackdrop = HomeBackdrop(
     stops = listOf(
-        0.00f to Color(0xFF261D0E),
-        0.50f to Color(0xFF1A1308),
-        1.00f to Color(0xFF100C06),
+        0.00f to Color(0xFF231A0C),
+        0.50f to Color(0xFF171107),
+        1.00f to Color(0xFF0E0A05),
     ),
     glows = listOf(
         HomeGlow(Color(0xFF8A6C2A), 0.18f, 0.16f, 0.10f, 0.80f),

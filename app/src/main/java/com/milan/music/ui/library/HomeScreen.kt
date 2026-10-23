@@ -25,9 +25,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -79,6 +76,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -98,6 +96,7 @@ import com.milan.music.ui.components.MiniPlayer
 import com.milan.music.ui.components.SearchGlyph
 import com.milan.music.ui.components.SortGlyph
 import com.milan.music.ui.glass.GlassSurface
+import com.milan.music.ui.text.labelText
 import com.milan.music.ui.theme.LocalGlassColors
 import com.milan.music.ui.theme.LikedRed
 import com.milan.music.ui.theme.MilanMotion
@@ -269,18 +268,13 @@ fun HomeScreen(
                 modifier = Modifier
                     .weight(1f)
                     .hazeSource(hazeState),
-                transitionSpec = {
-                    val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 20 } +
-                        fadeIn(tween(MilanMotion.MediumMs))
-                    val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 20 } +
-                        fadeOut(tween(MilanMotion.FastMs))
-                    enter togetherWith exit
-                },
+                transitionSpec = { MilanMotion.PageSwap },
                 contentKey = { it },
                 label = "library-tab",
             ) { tab ->
                 // Both tabs render the same list; only the source differs. One call
                 // site keeps the swipe/empty/loading behaviour from drifting apart.
+                // The build stamp is library-only: it is a diagnostic, not content.
                 SongsList(
                     tracks = if (tab == 0) state.tracks else state.favorites,
                     artworkRepository = container.artwork,
@@ -291,6 +285,7 @@ fun HomeScreen(
                     onToggleFavorite = viewModel::toggleFavorite,
                     contentPadding = contentPadding,
                     isLoading = state.loading,
+                    showBuildStamp = tab == 0,
                 )
             }
         }
@@ -328,10 +323,8 @@ fun HomeScreen(
             // 迷你播放器随队列出现/消失，底部玻璃导航栏保持贴底不动。
             AnimatedVisibility(
                 visible = playerState.hasQueue && playerState.currentTrack != null,
-                enter = fadeIn(tween(MilanMotion.MediumMs)) +
-                    slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 },
-                exit = fadeOut(tween(MilanMotion.FastMs)) +
-                    slideOutVertically(tween(MilanMotion.FastMs)) { it / 3 },
+                enter = MilanMotion.RiseIn,
+                exit = MilanMotion.SinkOut,
             ) {
                 Column {
                     MiniPlayer(
@@ -345,6 +338,9 @@ fun HomeScreen(
                     Spacer(Modifier.height(10.dp))
                 }
             }
+            // 在组合作用域里取值：`context.getString` 走的是 LocalContext，配置变化时
+            // 不会被失效（lint: LocalContextGetResourceValueCall）。
+            val rescanningText = stringResource(R.string.library_rescanning)
             GlassBottomBar(
                 selected = mainTab,
                 onSelect = { tab ->
@@ -355,7 +351,7 @@ fun HomeScreen(
                 },
                 onRescan = {
                     viewModel.refresh()
-                    Toast.makeText(context, "正在重新扫描曲库", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, rescanningText, Toast.LENGTH_SHORT).show()
                 },
                 hazeState = hazeState,
             )
@@ -431,6 +427,9 @@ private fun SearchField(
     hazeState: HazeState,
     modifier: Modifier = Modifier,
 ) {
+    // 读在组合作用域里：`semantics {}` 的 lambda 不是 @Composable，里面不能调 stringResource。
+    val sortLabel = stringResource(R.string.cd_sort)
+
     // 搜索框是浮起的液态玻璃（用户 2026-10-22 明确要求）。
     //
     // 上一版曾把它拉平成一款 5% 的平底，理由是它在 `Column` 里、与列表不重叠。
@@ -488,7 +487,7 @@ private fun SearchField(
                     // 与放大镜、排序同一枚墨色（用户 2026-10-22 追加要求：清除也一起纯黑）。
                     Icon(
                         imageVector = Icons.Rounded.Close,
-                        contentDescription = "清除",
+                        contentDescription = stringResource(R.string.cd_clear_search),
                         tint = iconInk,
                         modifier = Modifier.size(15.dp),
                     )
@@ -505,7 +504,7 @@ private fun SearchField(
             // 左 ↑ 主层 100%、右 ↓ 次层 55%，深浅两个箭头的明度差就是方案 03 的层次。
             SortGlyph(
                 iconSize = 20.dp,
-                modifier = Modifier.semantics { contentDescription = "排序" },
+                modifier = Modifier.semantics { contentDescription = sortLabel },
             )
             }
         }
@@ -549,7 +548,7 @@ private fun SortMenuOverlay(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = mode.label,
+                            text = mode.labelText(),
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onBackground,
@@ -611,16 +610,18 @@ private fun GlassBottomBar(
         label = "tab-taiji-spin",
     )
 
-    val tabs = remember {
+    val libraryTabLabel = stringResource(R.string.tab_library)
+    val favoritesTabLabel = stringResource(R.string.tab_favorites)
+    val tabs = remember(libraryTabLabel, favoritesTabLabel) {
         listOf(
             // 应用图标的太极，已裁掉外圈描边并补成黑白两半（drawable-night 里反相），
             // 22dp 框内不额外缩放。
             BottomTab(
                 icon = TabIcon.Plain(R.drawable.ic_tab_taiji),
-                label = "米兰",
+                label = libraryTabLabel,
                 accent = TabAccent.Ink,
             ),
-            BottomTab(TabIcon.Vector(Icons.Rounded.Favorite), "喜欢", TabAccent.Liked),
+            BottomTab(TabIcon.Vector(Icons.Rounded.Favorite), favoritesTabLabel, TabAccent.Liked),
         )
     }
 
@@ -730,16 +731,16 @@ private fun PermissionGate(
             )
             Spacer(Modifier.height(18.dp))
             Text(
-                text = "需要访问音频文件",
+                text = stringResource(R.string.gate_title),
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Spacer(Modifier.height(8.dp))
             Text(
                 text = if (permanentlyDenied) {
-                    "系统不再弹出授权窗口。请前往系统设置，在应用权限中手动开启音频访问。"
+                    stringResource(R.string.gate_body_denied)
                 } else {
-                    "米兰音乐只读取设备上已存在的音频文件用于播放，不会上传或修改任何内容。"
+                    stringResource(R.string.gate_body)
                 },
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -747,7 +748,7 @@ private fun PermissionGate(
             )
             Spacer(Modifier.height(22.dp))
             Button(onClick = if (permanentlyDenied) onOpenSettings else onRequest) {
-                Text(if (permanentlyDenied) "前往系统设置" else "授权访问")
+                Text(if (permanentlyDenied) stringResource(R.string.gate_action_settings) else stringResource(R.string.gate_action))
             }
         }
     }

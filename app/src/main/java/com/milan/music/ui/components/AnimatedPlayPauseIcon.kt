@@ -20,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.stringResource
+import com.milan.music.R
 import com.milan.music.ui.theme.MilanMotion
 
 /**
@@ -58,7 +60,7 @@ fun AnimatedPlayPauseIcon(
     ) { playing ->
         Icon(
             imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-            contentDescription = if (playing) "暂停" else "播放",
+            contentDescription = if (playing) stringResource(R.string.cd_pause) else stringResource(R.string.cd_play),
             tint = tint,
             modifier = Modifier.size(iconSize),
         )

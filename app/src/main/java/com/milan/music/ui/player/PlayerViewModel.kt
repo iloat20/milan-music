@@ -106,12 +106,15 @@ internal class PlayerViewModel(
      *     空的），接触层的上半边就会整块缺席 —— 真机表现是"过渡带里一点没糊，只有倒影
      *     变糊了"（第 51 批）。
      *  2. 推色只吃像素，放 `Dispatchers.Default`：96×96 的逐像素扫描在主线程上是可感的。
+     *
+     * 取封面失败时**不再重试第二次**。取消兜底已经由 [ArtworkRepository] 的 `MemoCache`
+     * 承担 —— 生产者被取消时它会重读一次缓存（生产者可能在 `NonCancellable` 里已经写好）。
+     * 外面再调一次 `loadPlayerArtwork`，在缓存确实是空的时候只会把解码再走一遍，失败路径
+     * 的等待时间翻倍。
      */
     suspend fun loadArtwork(track: Track): PlayerArtwork {
         val mirror = artwork.loadReflection(track)
         val cover = artwork.loadPlayerArtwork(track)
-            // 极端情况下（进程内第二次挂载、缓存被 trim）再取一次，命中即返回。
-            ?: artwork.loadPlayerArtwork(track)
         val haze = artwork.loadBackdrop(track)
         // 推色失败时 palette 是 null：调用方保留上一套颜色，不要切回兜底色（那是一次闪烁）。
         val palette = haze?.let { withContext(Dispatchers.Default) { paletteOfBitmap(it) } }

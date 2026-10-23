@@ -10,6 +10,11 @@ datastore = "1.2.1"
 serialization = "1.12.0"
 haze = "2.0.1"
 junit = "4.13.2"
+# 只用于 test classpath。运行时 coroutines 由 Compose / lifecycle 传递决定，目前是 1.9.0；
+# 测试端取最新是因为 lint 的 NewerVersionAvailable 会对着 Maven Central 逐条比对显式
+# 声明的版本，钉在 1.9.0 就多出一条与代码无关的 warning。MemoCache 只用 CompletableDeferred，
+# 两版语义一致，跑在哪个上面都不影响结论。
+coroutines = "1.11.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,9 +37,9 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 haze = { group = "dev.chrisbanes.haze", name = "haze", version.ref = "haze" }
 haze-glass = { group = "dev.chrisbanes.haze", name = "haze-glass", version.ref = "haze" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

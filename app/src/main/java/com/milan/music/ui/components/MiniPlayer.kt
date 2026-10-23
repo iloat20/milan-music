@@ -1,12 +1,6 @@
 package com.milan.music.ui.components
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +21,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.play.PlayerUiState
+import com.milan.music.R
 import com.milan.music.ui.glass.GlassSurface
+import com.milan.music.ui.text.artistText
+import com.milan.music.ui.text.titleText
 import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.noRippleClickable
 import dev.chrisbanes.haze.HazeState
@@ -86,27 +84,21 @@ fun MiniPlayer(
             AnimatedContent(
                 targetState = track,
                 modifier = Modifier.weight(1f),
-                transitionSpec = {
-                    val enter = slideInVertically(tween(MilanMotion.MediumMs)) { it / 3 } +
-                        fadeIn(tween(MilanMotion.MediumMs))
-                    val exit = slideOutVertically(tween(MilanMotion.FastMs)) { -it / 3 } +
-                        fadeOut(tween(MilanMotion.FastMs))
-                    enter togetherWith exit
-                },
+                transitionSpec = { MilanMotion.NeighbourSwap },
                 contentAlignment = Alignment.CenterStart,
                 contentKey = { it.id },
                 label = "mini-player-track",
             ) { item ->
                 Column(Modifier.fillMaxWidth()) {
                     Text(
-                        text = item.displayTitle,
+                        text = item.titleText(),
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = item.displayArtist,
+                        text = item.artistText(),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -146,7 +138,7 @@ fun MiniPlayer(
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.SkipNext,
-                        contentDescription = "下一首",
+                        contentDescription = stringResource(R.string.cd_next),
                         tint = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.size(28.dp),
                     )

@@ -1,4 +1,7 @@
--keep class com.milan.music.data.model.** { *; }
+# 没有 -keep class com.milan.music.data.model.** —— 真正被序列化的是
+# LibraryCacheStore.CachedTrack 与 UserDataStore 里的私有模型，它们的 serializer 由编译器
+# 生成并被代码直接引用（R8 看得到这条引用，不会当成未使用）。Track 不参与序列化，
+# 旧规则纯粹是白留，而且会掩盖"到底谁需要 keep"这个问题。
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
 -keepclassmembers class kotlinx.serialization.json.** { *** Companion; }

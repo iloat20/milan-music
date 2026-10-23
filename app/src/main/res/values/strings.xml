@@ -1,6 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">米兰音乐</string>
+
+    <!-- 曲目字段的兜底显示。Track 只保留 MediaStore 的原值，这些是界面文本。 -->
+    <string name="track_untitled">未知曲目</string>
+    <string name="track_unknown_artist">未知艺人</string>
+    <string name="track_unknown_album">未知专辑</string>
+
+    <!-- 排序 -->
+    <string name="sort_title">标题</string>
+    <string name="sort_artist">艺人</string>
+    <string name="sort_album">专辑</string>
+    <string name="sort_date_added">最近添加</string>
+    <string name="sort_duration">时长</string>
+
+    <!-- 页签 -->
+    <string name="tab_library">米兰</string>
+    <string name="tab_favorites">喜欢</string>
+
+    <!-- 无障碍描述 -->
+    <string name="cd_play">播放</string>
+    <string name="cd_pause">暂停</string>
+    <string name="cd_like">喜欢</string>
+    <string name="cd_unlike">取消喜欢</string>
+    <string name="cd_next">下一首</string>
+    <string name="cd_previous">上一首</string>
+    <string name="cd_clear_search">清除</string>
+    <string name="cd_sort">排序</string>
+
+    <!-- 曲库状态 -->
+    <string name="library_scanning_title">正在扫描音乐库</string>
+    <string name="library_scanning_body">首次启动需要读取设备上的音频文件，请稍候。</string>
+    <string name="library_empty_title">这里还没有歌曲</string>
+    <string name="library_empty_body">把音频文件放到手机的 Music 目录，或稍后重新扫描音乐库。</string>
+    <string name="library_rescanning">正在重新扫描曲库</string>
+    <string name="player_nothing_playing">未在播放</string>
+
+    <!-- 权限门槛 -->
+    <string name="gate_title">需要访问音频文件</string>
+    <string name="gate_body">米兰音乐只读取设备上已存在的音频文件用于播放，不会上传或修改任何内容。</string>
+    <string name="gate_body_denied">系统不再弹出授权窗口。请前往系统设置，在应用权限中手动开启音频访问。</string>
+    <string name="gate_action">授权访问</string>
+    <string name="gate_action_settings">前往系统设置</string>
+
+    <!-- 桌面小组件 -->
     <string name="widget_description">2×2 播放器卡片，显示封面与当前歌曲</string>
     <string name="widget_play_pause">播放或暂停</string>
 </resources>

@@ -5,10 +5,18 @@ import java.util.Properties
 //   KEYSTORE_KEY_PASSWORD=...
 // A machine without those entries builds debug fine; release signing fails with a
 // keystore error until the two lines are added.
-val keystoreProps = Properties().apply {
-    rootProject.file("local.properties").takeIf { it.exists() }
-        ?.inputStream()?.use { load(it) }
+//
+// 用 `providers.fileContents` 而不是 `File.inputStream()`：后者是在配置期裸读文件，
+// 配置缓存看不到这层依赖，改了 local.properties 也可能复用旧条目（最坏情况是把空口令
+// 缓存下来，表现成"签名突然失败"）。FileContents 是受跟踪的值源。
+val keystoreProps: Provider<Properties> = providers.fileContents(
+    rootProject.layout.projectDirectory.file("local.properties"),
+).asText.orElse("").map { text ->
+    Properties().apply { text.reader().use { load(it) } }
 }
+
+/** 唯一版本号来源；版本名由它派生（见 `defaultConfig`）。 */
+val appVersionCode = 65
 
 plugins {
     alias(libs.plugins.android.application)
@@ -24,17 +32,20 @@ android {
         applicationId = "com.milan.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 62
-        versionName = "1.0.61"
+        // 只维护 versionCode，版本名由它派生。两者手改必然错位（P2-6 当时就是
+        // vc 61 配 1.0.60）；1.0.x 期间 patch 恒等于 code − 1，升到 1.1 再改成显式两者。
+        // DSL 里的 versionCode 是 Int?，所以派生要从这个本地值算。
+        versionCode = appVersionCode
+        versionName = "1.0.${appVersionCode - 1}"
         vectorDrawables { useSupportLibrary = true }
     }
 
     signingConfigs {
         create("release") {
             storeFile = file(System.getProperty("user.home") + "/.android/milanmusic-release.keystore")
-            storePassword = keystoreProps.getProperty("KEYSTORE_STORE_PASSWORD", "")
+            storePassword = keystoreProps.get().getProperty("KEYSTORE_STORE_PASSWORD", "")
             keyAlias = "milanmusic"
-            keyPassword = keystoreProps.getProperty("KEYSTORE_KEY_PASSWORD", "")
+            keyPassword = keystoreProps.get().getProperty("KEYSTORE_KEY_PASSWORD", "")
             // v3 is what allows key rotation if the keystore is ever replaced; v4
             // signs the .idsig side file that incremental installs use.
             enableV3Signing = true
@@ -79,6 +90,9 @@ android {
 
     buildFeatures {
         compose = true
+        // 曲库列表末尾那行版本戳要读 BuildConfig.VERSION_NAME / VERSION_CODE / DEBUG。
+        // 有了它，"装错包/改动没生效"从两轮排查变成滚到底看一眼。
+        buildConfig = true
     }
 
     packaging {
@@ -131,4 +145,7 @@ dependencies {
     implementation(libs.haze.glass)
 
     testImplementation(libs.junit)
+    // 只为 MemoCache 的并发时序：合并同 key 请求、以及"生产者被取消后等待方重读缓存"
+    // 这两条只有在能控制调度器时才能可靠复现。不是 mock 框架，也不进生产包。
+    testImplementation(libs.kotlinx.coroutines.test)
 }

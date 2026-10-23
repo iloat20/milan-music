@@ -14,8 +14,10 @@ import com.milan.music.data.prefs.SettingsStore
 import com.milan.music.data.userdata.UserData
 import com.milan.music.data.userdata.UserDataStore
 import com.milan.music.di.AppContainer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -46,6 +48,15 @@ private data class SortedLibrary(
 private inline fun <T, K : Comparable<K>> List<T>.sortByCached(key: (T) -> K): List<T> =
     map { it to key(it) }.sortedBy { it.second }.map { it.first }
 
+/**
+ * 排序键：折叠大小写，缺失字段统一排到最后。
+ *
+ * 原先排序用的是 `Track.displayTitle` 这类**显示**字段，而它会把空标题折叠成"未知曲目"——
+ * 于是排序结果依赖界面语言。现在模型只给原值，缺失项用一个语言无关的哨兵顶到末尾，
+ * 位置与旧行为一致。
+ */
+private fun String.sortKeyOrLast(): String = ifBlank { "\uFFFF" }.lowercase()
+
 class LibraryViewModel(
     private val mediaStore: MediaStoreRepository,
     private val libraryCache: LibraryCacheStore,
@@ -57,6 +68,9 @@ class LibraryViewModel(
     private val queryInput = MutableStateFlow("")
     private val loading = MutableStateFlow(true)
     private var cacheLoaded = false
+
+    /** The scan currently in flight, if any. See [launchScan] for why it exists. */
+    private var scanJob: Job? = null
 
     /** Immediate text, used by the search field so typing never feels laggy. */
     val query: StateFlow<String> = queryInput.asStateFlow()
@@ -92,22 +106,22 @@ class LibraryViewModel(
             tracks
         } else {
             tracks.filter { track ->
-                track.displayTitle.contains(currentQuery, ignoreCase = true) ||
-                    track.displayArtist.contains(currentQuery, ignoreCase = true) ||
-                    track.displayAlbum.contains(currentQuery, ignoreCase = true)
+                track.title.contains(currentQuery, ignoreCase = true) ||
+                    track.artist.contains(currentQuery, ignoreCase = true) ||
+                    track.album.contains(currentQuery, ignoreCase = true)
             }
         }
 
         val sorted = when (sort) {
-            SortMode.TITLE -> filtered.sortByCached { it.displayTitle.lowercase() }
+            SortMode.TITLE -> filtered.sortByCached { it.title.sortKeyOrLast() }
             // Chained stable sorts: sort by the secondary key first, then the
             // primary — TimSort's stability keeps the secondary ordering intact.
             SortMode.ARTIST -> filtered
-                .sortByCached { it.displayTitle.lowercase() }
-                .sortByCached { it.displayArtist.lowercase() }
+                .sortByCached { it.title.sortKeyOrLast() }
+                .sortByCached { it.artist.sortKeyOrLast() }
             SortMode.ALBUM -> filtered
                 .sortByCached { it.trackNumber }
-                .sortByCached { it.displayAlbum.lowercase() }
+                .sortByCached { it.album.sortKeyOrLast() }
             SortMode.DATE_ADDED -> filtered.sortedByDescending { it.dateAdded }
             SortMode.DURATION -> filtered.sortedByDescending { it.duration }
         }
@@ -150,8 +164,7 @@ class LibraryViewModel(
      */
     fun ensureLoaded() {
         if (cacheLoaded) return
-        cacheLoaded = true
-        viewModelScope.launch {
+        launchScan {
             // Rows and watermark from a single read: two separate reads can straddle a
             // concurrent save, which would pair the rows of one generation with the
             // watermark of another.
@@ -179,7 +192,7 @@ class LibraryViewModel(
                 val stored = snapshot.stamp
                 if (stamp.sameAs(stored)) {
                     Log.i(TAG, "library unchanged (${stored?.describe()}), rescan skipped")
-                    return@launch
+                    return@launchScan
                 }
             }
 
@@ -194,7 +207,7 @@ class LibraryViewModel(
                         "keeping the cache and forcing a rescan next launch",
                 )
                 loading.value = false
-                return@launch
+                return@launchScan
             }
 
             // Compare whole rows, not id sets. Re-tagging a file rewrites title,
@@ -220,7 +233,36 @@ class LibraryViewModel(
 
     /** Forces a fresh MediaStore scan and rewrites the cache. */
     fun refresh() {
-        viewModelScope.launch { scan() }
+        launchScan { scan() }
+    }
+
+    /**
+     * Runs [block] as *the* scan for this moment, or drops it if one is already in
+     * flight.
+     *
+     * The dedupe is not cosmetic. `HomeScreen` has two independent triggers for the
+     * first library read — the permission callback calls `refresh()`, and the
+     * `LaunchedEffect` keyed on the grant calls `ensureLoaded()`. Both fire on the
+     * same frame, so the first launch walked the whole MediaStore twice, and the
+     * first launch is the one the user waits on.
+     */
+    private fun launchScan(block: suspend () -> Unit) {
+        cacheLoaded = true
+        if (scanJob?.isActive == true) return
+        scanJob = viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Put the flag back: it is set before the work starts, so a throwing
+                // read used to leave this device convinced the library was loaded and
+                // every later `ensureLoaded()` would no-op until the process died.
+                cacheLoaded = false
+                loading.value = false
+                Log.w(TAG, "library scan failed; the next request retries", e)
+            }
+        }
     }
 
     private suspend fun scan() {

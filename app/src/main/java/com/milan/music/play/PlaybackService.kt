@@ -21,6 +21,9 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.milan.music.MilanMusicApp
 import com.milan.music.data.model.Track
+import com.milan.music.ui.text.albumText
+import com.milan.music.ui.text.artistText
+import com.milan.music.ui.text.titleText
 
 /**
  * Hosts the ExoPlayer instance in a foreground service so playback survives
@@ -107,9 +110,9 @@ class PlaybackService : MediaSessionService() {
     private fun MediaItem.withMetadata(track: Track): MediaItem = buildUpon()
         .setMediaMetadata(
             MediaMetadata.Builder()
-                .setTitle(track.displayTitle)
-                .setArtist(track.displayArtist)
-                .setAlbumTitle(track.displayAlbum)
+                .setTitle(track.titleText(this@PlaybackService))
+                .setArtist(track.artistText(this@PlaybackService))
+                .setAlbumTitle(track.albumText(this@PlaybackService))
                 .setArtworkUri(track.uri)
                 .build(),
         )
