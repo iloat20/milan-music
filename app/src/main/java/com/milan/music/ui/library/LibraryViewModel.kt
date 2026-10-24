@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.milan.music.data.media.LibraryCacheStore
+import com.milan.music.data.media.LibraryRevision
 import com.milan.music.data.media.MediaStoreRepository
 import com.milan.music.data.model.SortMode
 import com.milan.music.data.model.Track
@@ -62,6 +63,7 @@ class LibraryViewModel(
     private val libraryCache: LibraryCacheStore,
     private val userData: UserDataStore,
     private val settings: SettingsStore,
+    private val libraryRevision: LibraryRevision,
 ) : ViewModel() {
 
     private val allTracks = MutableStateFlow<List<Track>>(emptyList())
@@ -170,6 +172,15 @@ class LibraryViewModel(
             // watermark of another.
             val snapshot = libraryCache.snapshot()
             val cached = snapshot.tracks
+
+            // Publish the cached rows before the generation call. They are already in
+            // memory and identical to what the UI would show after a matching stamp;
+            // waiting for a binder round trip only delays the first content frame.
+            if (cached.isNotEmpty()) {
+                allTracks.value = cached
+                loading.value = false
+            }
+
             // Taken once, before any row is read, then reused for the write below.
             //
             // Two reasons the *pre-read* value is the correct one to store. First
@@ -183,10 +194,8 @@ class LibraryViewModel(
             // manual refresh. Storing the earlier stamp makes that launch rescan
             // instead, which heals in one pass.
             val stamp = mediaStore.stamp()
-            if (cached.isNotEmpty()) {
-                allTracks.value = cached
-                loading.value = false
 
+            if (cached.isNotEmpty()) {
                 // The stamp is written in the same commit as the rows, so a match
                 // means the snapshot still describes what the provider has indexed.
                 val stored = snapshot.stamp
@@ -196,20 +205,23 @@ class LibraryViewModel(
                 }
             }
 
-            val fresh = mediaStore.loadTracks()
+            val scan = mediaStore.scanTracks()
 
-            // An empty result while a non-empty cache exists almost always means the
-            // index was momentarily unavailable; do not wipe the user's library.
-            if (keepsCachedLibraryOnEmptyScan(fresh.size, cached.size)) {
+            // Two cases must leave the cached library alone: an interrupted cursor
+            // (partial rows) and a transiently empty provider. Both are indistinguishable
+            // from a real library change by row count alone; `complete` is what tells
+            // them apart. See [shouldApplyScan].
+            if (!shouldApplyScan(scan.tracks.size, scan.complete, cached.size)) {
                 Log.w(
                     TAG,
-                    "rescan returned 0 tracks while ${cached.size} are cached; " +
-                        "keeping the cache and forcing a rescan next launch",
+                    "rescan incomplete=${!scan.complete} read=${scan.tracks.size} " +
+                        "cached=${cached.size}; keeping the cache and retrying next launch",
                 )
                 loading.value = false
                 return@launchScan
             }
 
+            val fresh = scan.tracks
             // Compare whole rows, not id sets. Re-tagging a file rewrites title,
             // artist and album in place: the ids — and the row count — stay identical,
             // so an id comparison reads "nothing changed" and throws away the very
@@ -226,6 +238,7 @@ class LibraryViewModel(
             // the stamp existed has none, so it fails the comparison exactly once and
             // heals here.
             libraryCache.save(fresh, stamp)
+            libraryRevision.bump()
 
             loading.value = false
         }
@@ -271,23 +284,23 @@ class LibraryViewModel(
         // that lands mid-scan forces the next launch to rescan rather than going
         // unnoticed.
         val stamp = mediaStore.stamp()
-        val tracks = mediaStore.loadTracks()
+        val scan = mediaStore.scanTracks()
         // The explicit-refresh path needs the same guard as [ensureLoaded], and it is
-        // the path that runs when the user already believes something is wrong. A
-        // provider that answers with zero rows while it rebuilds would empty the
-        // library *and* stamp that emptiness as current, so the next launch would
-        // match the stamp and skip the rescan that could have healed it.
-        if (keepsCachedLibraryOnEmptyScan(tracks.size, allTracks.value.size)) {
+        // the path that runs when the user already believes something is wrong. Neither
+        // a partial cursor nor a provider that answers with zero rows while it rebuilds
+        // may empty the library *and* stamp that state as current.
+        if (!shouldApplyScan(scan.tracks.size, scan.complete, allTracks.value.size)) {
             Log.w(
                 TAG,
-                "rescan returned 0 tracks while ${allTracks.value.size} are cached; " +
-                    "keeping the library and forcing a rescan next launch",
+                "refresh incomplete=${!scan.complete} read=${scan.tracks.size} " +
+                    "cached=${allTracks.value.size}; keeping the library",
             )
             loading.value = false
             return
         }
-        allTracks.value = tracks
-        libraryCache.save(tracks, stamp)
+        allTracks.value = scan.tracks
+        libraryCache.save(scan.tracks, stamp)
+        libraryRevision.bump()
         loading.value = false
     }
 
@@ -314,6 +327,7 @@ class LibraryViewModel(
                     container.libraryCache,
                     container.userData,
                     container.settings,
+                    container.libraryRevision,
                 )
             }
         }
@@ -321,17 +335,27 @@ class LibraryViewModel(
 }
 
 /**
- * Whether a scan that returned [freshCount] rows must leave the current library alone.
+ * Whether a scan result may replace the library and its persisted stamp.
  *
- * MediaProvider answers a query with zero rows while it is restarting, rebuilding its
- * index, or when the permission check races the read — indistinguishable from an
- * emptied library at this level. Treating that as "the user has no music" clears the
- * list *and* stamps the empty snapshot as current, so the next launch matches the
- * stamp and skips the rescan that could have healed it. Only a genuinely empty
- * library (nothing cached, nothing returned) may replace what is on screen.
+ * Two refusals, for two different provider behaviours:
+ *
+ * - **Incomplete**: the cursor threw after some rows. A partial list looks exactly
+ *   like a successful scan to a count check, so it used to be published, persisted
+ *   and stamped as current. The missing tracks then stayed invisible until
+ *   MediaStore's generation changed again.
+ * - **Complete but empty while a cache exists**: MediaProvider answers with zero
+ *   rows while it restarts or rebuilds its index, indistinguishable from an emptied
+ *   library at this level. Stamping that emptiness as current would also stop the
+ *   next launch from healing it.
+ *
+ * An actually empty library (nothing cached, nothing returned) is still applied, so
+ * a fresh install and a deliberately emptied device both settle on "no music".
  *
  * Kept as a free function so the decision is unit-testable without Android: the
  * `LibraryViewModel` around it needs DataStore, a ContentResolver and a main looper.
  */
-internal fun keepsCachedLibraryOnEmptyScan(freshCount: Int, cachedCount: Int): Boolean =
-    freshCount == 0 && cachedCount > 0
+internal fun shouldApplyScan(
+    scannedCount: Int,
+    complete: Boolean,
+    cachedCount: Int,
+): Boolean = complete && (scannedCount > 0 || cachedCount == 0)

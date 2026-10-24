@@ -16,7 +16,7 @@ val keystoreProps: Provider<Properties> = providers.fileContents(
 }
 
 /** 唯一版本号来源；版本名由它派生（见 `defaultConfig`）。 */
-val appVersionCode = 65
+val appVersionCode = 66
 
 plugins {
     alias(libs.plugins.android.application)
@@ -116,6 +116,18 @@ kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
+}
+
+/**
+ * P1-5：Compose 稳定性报告。
+ *
+ * 只写进构建目录，不改变产物。报告是给"要不要加 `stabilityConfigurationFile`"提供
+ * 证据的：只有报告里确实标成 unstable、而代码又保证不可变的类才值得加，凭感觉写
+ * `@Immutable` 会让重组跳过本该发生的更新。
+ */
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_compiler")
+    metricsDestination = layout.buildDirectory.dir("compose_compiler")
 }
 
 dependencies {

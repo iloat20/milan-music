@@ -34,6 +34,7 @@ private data class CachedTrack(
     val trackNumber: Int = 0,
     val dateAdded: Long = 0L,
     val dateModified: Long = 0L,
+    val albumArtist: String = "",
 )
 
 private fun CachedTrack.toTrack(): Track = Track(
@@ -49,6 +50,7 @@ private fun CachedTrack.toTrack(): Track = Track(
     trackNumber = trackNumber,
     dateAdded = dateAdded,
     dateModified = dateModified,
+    albumArtist = albumArtist,
 )
 
 private fun Track.toCached(): CachedTrack = CachedTrack(
@@ -64,6 +66,7 @@ private fun Track.toCached(): CachedTrack = CachedTrack(
     trackNumber = trackNumber,
     dateAdded = dateAdded,
     dateModified = dateModified,
+    albumArtist = albumArtist,
 )
 
 private val Context.libraryCacheStore: DataStore<Preferences> by

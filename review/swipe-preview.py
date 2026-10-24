@@ -54,9 +54,9 @@ def smoothstep(t):
 
 
 def fade_mask() -> Image.Image:
-    """叠层的纵向包络：FadeHold=24dp 满，到 FadeEnd=104dp 收干净（下方全透明）。"""
+    """叠层的纵向包络：FadeHold=24dp 满，到 FadeEnd=128dp 收干净（下方全透明）。"""
     hold = 24 * dp
-    end = 104 * dp
+    end = 128 * dp
     m = Image.new("L", (W, band.height))
     mp = m.load()
     for y in range(band.height):

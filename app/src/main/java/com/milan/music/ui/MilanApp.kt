@@ -37,6 +37,7 @@ fun MilanApp(container: AppContainer) {
             HomeScreen(
                 container = container,
                 onOpenPlayer = { playerOpen = true },
+                isCovered = playerOpen,
             )
 
             AnimatedVisibility(

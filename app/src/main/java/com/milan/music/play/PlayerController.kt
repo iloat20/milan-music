@@ -252,11 +252,31 @@ class PlayerController(
         if (_state.value.queueSize == 0) release()
     }
 
-    fun playQueue(tracks: List<Track>, startIndex: Int) {
+    /**
+     * Replaces the session queue and starts (or prepares) it.
+     *
+     * The defaults preserve the original "open the app and start playing" behaviour.
+     * [startPositionMs], [shuffle], [repeatMode] and [autoPlay] exist for the cold-start
+     * restore: the last queue and timestamp come back unchanged, and a user who had
+     * paused before the process died does not get sound on launch.
+     *
+     * [autoPlay] = false still calls `prepare()` so the notification, the mini player
+     * and the artwork are live; it only leaves `playWhenReady` false.
+     */
+    fun playQueue(
+        tracks: List<Track>,
+        startIndex: Int,
+        startPositionMs: Long = 0L,
+        shuffle: Boolean = true,
+        repeatMode: Int = Player.REPEAT_MODE_ALL,
+        autoPlay: Boolean = true,
+    ) {
         if (tracks.isEmpty()) return
         val mediaController = controller
         if (mediaController == null) {
-            pendingActions.addLast { playQueue(tracks, startIndex) }
+            pendingActions.addLast {
+                playQueue(tracks, startIndex, startPositionMs, shuffle, repeatMode, autoPlay)
+            }
             connect()
             return
         }
@@ -267,15 +287,19 @@ class PlayerController(
         // race an earlier resolution.
         trackIndex.replace(tracks)
         val items = tracks.map { it.toMediaItem() }
-        mediaController.setMediaItems(items, index, 0L)
+        mediaController.setMediaItems(items, index, startPositionMs.coerceAtLeast(0L))
         // Playback always starts in shuffle mode; the user can still turn it off
         // from the player screen.
-        mediaController.shuffleModeEnabled = true
+        mediaController.shuffleModeEnabled = shuffle
         // The mode button is hidden from the UI, so looping is pinned on: without it
         // playback would simply stop at the end of the shuffled queue.
-        mediaController.repeatMode = Player.REPEAT_MODE_ALL
+        mediaController.repeatMode = repeatMode
         mediaController.prepare()
-        mediaController.play()
+        if (autoPlay) {
+            mediaController.play()
+        } else {
+            mediaController.pause()
+        }
         refresh()
     }
 
@@ -369,8 +393,16 @@ class PlayerController(
         // position in the shuffled order — not an index into `queue`. The only
         // correct lookup is by mediaId; the index fallback fires only before any
         // media item has been set.
-        val currentTrack = mediaItem?.mediaId
-            ?.let(trackIndex::get)
+        // Playback can start without this controller: a library browser sends its own
+        // items, and the system can resume a queue after process death. In both cases
+        // the index has no entry, so fall back to the item's own metadata and seed the
+        // index; otherwise the player screen would show no title, artwork or
+        // neighbours while the session is audibly playing.
+        fun resolve(item: MediaItem): Track? =
+            trackIndex.get(item.mediaId)
+                ?: item.toFallbackTrack()?.also(trackIndex::put)
+
+        val currentTrack = mediaItem?.let { resolve(it) }
             ?: queue.getOrNull(mediaController.currentMediaItemIndex)
 
         // The player's own indices, not queue[current ± 1]: shuffle reorders the
@@ -380,7 +412,7 @@ class PlayerController(
         // offer a transition that goes nowhere.
         fun neighborAt(index: Int): Track? {
             if (index !in 0 until mediaController.mediaItemCount) return null
-            return trackIndex.get(mediaController.getMediaItemAt(index).mediaId)
+            return resolve(mediaController.getMediaItemAt(index))
                 ?.takeIf { it.id != currentTrack?.id }
         }
 

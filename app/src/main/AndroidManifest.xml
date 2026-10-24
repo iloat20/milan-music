@@ -52,17 +52,33 @@
              playback from the media notification, Bluetooth controls and Android
              Auto, and none of them hold a permission this app could require.
              Authorization is enforced one layer up by MediaSession, which is what
-             decides whether a connecting controller may issue transport commands. -->
+             decides whether a connecting controller may issue transport commands.
+
+             Both actions are required. `MediaLibraryService` is what Media3 clients
+             (and the system's boot-time recent-media query) look for;
+             `MediaBrowserService` keeps platform/legacy browsers and Android Auto
+             able to discover the library. The service now actually implements the
+             browse contract instead of only declaring it. -->
         <service
             android:name=".play.PlaybackService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback"
             tools:ignore="ExportedService">
             <intent-filter>
-                <action android:name="androidx.media3.session.MediaSessionService" />
+                <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- Routes MEDIA_BUTTON events into the session when no controller is bound.
+             Without it a Bluetooth play key is lost after the process was killed. -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".widget.MusicWidgetProvider"

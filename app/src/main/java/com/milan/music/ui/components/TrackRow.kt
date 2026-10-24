@@ -111,6 +111,15 @@ fun TrackRow(
     }
 }
 
+/**
+ * Whether the row's infinite animation has a chance of being seen.
+ *
+ * The library stays composed underneath the player sheet, so `isPlaying` alone is not
+ * enough: a covered row used to keep a 60 fps transition alive behind an opaque page.
+ */
+internal fun shouldAnimatePlayingBars(isPlaying: Boolean, uiCovered: Boolean): Boolean =
+    isPlaying && !uiCovered
+
 @Composable
 fun PlayingBars(
     color: Color,

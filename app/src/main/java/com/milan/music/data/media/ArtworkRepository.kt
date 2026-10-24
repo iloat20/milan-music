@@ -53,10 +53,15 @@ class ArtworkRepository(private val context: Context) {
      * Total bitmap budget, shared with the notification loader. See [BitmapBudget]
      * for why it is derived from the heap rather than hard-coded.
      *
-     * Slices below sum to 14.5/16: list 8, player 2, backdrop 1, reflection 0.5,
-     * notification 3. The remaining 1.5/16 is deliberate headroom: decoding a cover
-     * holds the source and the scaled result at the same time, and that transient
-     * allocation lives outside every cache, so it must not be counted against them.
+     * Slices below sum to 30/32: list 16, player 6, backdrop 2, reflection 1,
+     * notification 5. The remaining 2/32 (1.5 MB at a 192 MB heap) is deliberate
+     * headroom: decoding a cover holds the source and the scaled result at the same
+     * time, and that transient allocation lives outside every cache, so it must not be
+     * counted against them.
+     *
+     * The shared denominator is 32 rather than 16 so the reflection can drop to 1/32
+     * (0.75 MB) now that API 31+ never populates it, while the player keeps its exact
+     * 6/32 — three covers plus one spare, the guarantee described below.
      */
     private val budget = BitmapBudget.totalBytes(context)
 
@@ -67,12 +72,12 @@ class ArtworkRepository(private val context: Context) {
      * `allocationByteCount`: MediaProvider is free to answer `loadThumbnail` with a
      * HARDWARE bitmap, whose real footprint bears no relation to `w * h * 4`.
      *
-     * The 8/16 slice is 12 MB at a 192 MB heap — about 80 albums at 147 KB each, i.e.
-     * several screens of scroll-back. It was 10/16; that extra 3 MB never bought a
-     * decode that this one misses on any realistic scroll, and it was resident for as
+     * The 16/32 slice is 12 MB at a 192 MB heap — about 80 albums at 147 KB each, i.e.
+     * several screens of scroll-back. It was 20/32 (10/16); that extra 3 MB never bought
+     * a decode that this one misses on any realistic scroll, and it was resident for as
      * long as the process lived.
      */
-    private val cache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 8, 16)) {
+    private val cache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 16, 32)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -82,10 +87,10 @@ class ArtworkRepository(private val context: Context) {
      * The carousel keeps three pages composed at once (previous / current / next), and
      * the one that becomes current re-reads the cache on the frame it is re-composed —
      * a miss there paints the placeholder gradient before the cover, which reads as a
-     * flash on every switch. A 512 px cover is ~1 MB, so `2/16` of a 24 MB budget held
-     * exactly three and any eviction broke that guarantee; `3/16` leaves one spare.
+     * flash on every switch. A 512 px cover is ~1 MB, so `4/32` of a 24 MB budget held
+     * exactly three and any eviction broke that guarantee; `6/32` leaves one spare.
      */
-    private val playerCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 3, 16)) {
+    private val playerCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 6, 32)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -97,23 +102,19 @@ class ArtworkRepository(private val context: Context) {
      * a decode for an image that had not changed. One album's backdrop is ~36 KB, so
      * this slice holds dozens.
      */
-    private val backdropCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 1, 16)) {
+    private val backdropCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 2, 32)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
     /**
-     * Vertically flipped covers, keyed by albumId. The player draws one under the
-     * cover as its reflection.
+     * Vertically flipped covers for the pre-API-31 reflection band, keyed by albumId.
      *
-     * **The slice has to exceed one bitmap or this cache holds nothing.** [LruCache]
-     * evicts on insert while `size > maxSize`, so a single entry larger than the cap
-     * evicts itself and the next caller pays a full decode-and-flip again. At `1/32` of
-     * a 24 MB budget the cap was 768 KB against a ~1 MB 512 px reflection: the cache
-     * was a no-op on every device, and every track change re-ran the flip.
-     * [REFLECTION_LEGACY_SIZE] on API 30 and below is a few KB, so this slice holds
-     * plenty there (see [reflectionOf]).
+     * API 31+ never populates this cache: the ramp path mirrors `cover` on the canvas,
+     * so [loadReflection] returns `null` there without decoding anything (see its KDoc).
+     * The slice therefore only has to hold [REFLECTION_LEGACY_SIZE] entries (~10 KB
+     * each); 1/32 of a 24 MB budget is dozens of them.
      */
-    private val reflectionCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 2, 32)) {
+    private val reflectionCache = object : LruCache<Long, Bitmap>(BitmapBudget.slice(budget, 1, 32)) {
         override fun sizeOf(key: Long, value: Bitmap): Int = value.allocationByteCount
     }
 
@@ -175,32 +176,36 @@ class ArtworkRepository(private val context: Context) {
         }
 
     /**
-     * Vertically flipped cover, for the player's reflection band under the artwork.
+     * Vertically flipped cover for the reflection band, or `null` on API 31+.
      *
-     * Sourced from [loadPlayerArtwork] rather than [loadBackdrop]: the reflection has to
-     * stay **recognisable as the cover**, and a 96 px thumbnail scaled to half a screen
-     * is 11x — no blur radius leaves a pattern in it. The player cover is already
-     * decoded and cached, so this costs a flip and no extra MediaProvider round trip.
+     * **API 31+ does not need this bitmap.** The ramp path mirrors `cover` on the canvas
+     * (`canRamp`) and never reads `mirror`; building it anyway cost a 512² software
+     * copy, a scale, an `IntArray` and a new bitmap on every track change, plus a
+     * resident cache entry no draw call ever touched.
+     *
+     * The call still warms [loadPlayerArtwork] first on that path:
+     * `PlayerViewModel.loadArtwork` relies on this call having decoded the cover, so a
+     * cancellation here cannot hand the player screen an empty cache.
+     *
+     * Below 31 `Modifier.blur` is a no-op, so softness has to come from resolution
+     * alone: the flipped bitmap is stored at [REFLECTION_LEGACY_SIZE] and upscaled.
      *
      * The flip works on pixels rather than a `Matrix` so [reflectRows] stays a plain
      * function that unit tests can drive without a device.
      */
-    suspend fun loadReflection(track: Track): ImageBitmap? =
-        reflectionMemo.load(track.albumId) { albumId ->
-            val source = loadPlayerArtwork(track)
-            // `Modifier.blur` is an API 31 RenderEffect; below that the reflection can
-            // only be softened by its own resolution, so the bitmap is stored tiny.
-            val targetWidth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                REFLECTION_SIZE
-            } else {
-                REFLECTION_LEGACY_SIZE
-            }
-            val flipped = source?.let {
-                withContext(Dispatchers.IO) { reflectionOf(it, targetWidth) }
+    suspend fun loadReflection(track: Track): ImageBitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            loadPlayerArtwork(track)
+            return null
+        }
+        return reflectionMemo.load(track.albumId) { albumId ->
+            val flipped = loadPlayerArtwork(track)?.let {
+                withContext(Dispatchers.IO) { reflectionOf(it, REFLECTION_LEGACY_SIZE) }
             }
             if (flipped != null) reflectionCache.put(albumId, flipped)
             flipped?.asImageBitmap()
         }
+    }
 
     fun cached(albumId: Long): ImageBitmap? = cache.get(albumId)?.asImageBitmap()
 
@@ -468,21 +473,14 @@ class ArtworkRepository(private val context: Context) {
         private const val BACKDROP_SIZE = 96
 
         /**
-         * Reflection width where `Modifier.blur` is available (API 31+).
-         *
-         * Matches [PLAYER_THUMB_SIZE]: the reflection is drawn at the same size as the
-         * cover it mirrors, so scaling it down first would only lose detail the 14 dp
-         * blur does not hide.
-         */
-        private const val REFLECTION_SIZE = PLAYER_THUMB_SIZE
-
-        /**
          * Reflection width on API 26-30, where `Modifier.blur` is a no-op.
          *
          * Softness has to come from resolution alone there. 96 px was tried and rejected
          * on a portrait cover: an 11x upscale still resolves a face clearly, and a
          * face hanging upside down under the title reads as a rendering bug. 48 px
          * degrades it to colour patches.
+         *
+         * API 31+ has no equivalent constant: it draws the mirror from the cover itself.
          */
         private const val REFLECTION_LEGACY_SIZE = 48
 
@@ -496,8 +494,9 @@ class ArtworkRepository(private val context: Context) {
  * Flips an ARGB pixel buffer top-to-bottom.
  *
  * Pure so unit tests can pin the row order without a `Bitmap`. `System.arraycopy` per
- * row rather than an element-wise loop: the buffers are 512*512 ints on API 31+, and a
- * per-pixel Kotlin loop costs noticeably more than a native block copy.
+ * row rather than an element-wise loop: the buffers are only 48×48 ints now that API 31+
+ * mirrors the cover on the canvas, but a per-pixel Kotlin loop still costs more than a
+ * native block copy.
  */
 internal fun reflectRows(pixels: IntArray, width: Int, height: Int): IntArray {
     require(width > 0 && height > 0) { "reflection needs a non-empty image" }

@@ -14,11 +14,13 @@ import android.content.Context
  * hardware should not be asked for it.
  *
  * The ceiling started at 48 MB and is now 32 MB, and the list slice went from 10/16
- * to 8/16 of the total. Concretely, a 192 MB heap (24 MB total, below the cap) gives
+ * to 16/32 of the total. Concretely, a 192 MB heap (24 MB total, below the cap) gives
  * the list 12 MB instead of 15 MB, and a 512 MB heap that used to sit at the 48 MB cap
  * now stops at 32 MB. The list slice is the only consumer that grows with scroll depth,
  * and 12 MB still spans ~80 albums at 192 px — more scroll-back than a session
- * performs. See [com.milan.music.data.media.ArtworkRepository] for the slice split.
+ * performs. See [com.milan.music.data.media.ArtworkRepository] for the slice split:
+ * five caches share a 32 denominator and stop at 30/32, so 1.5 MB at a 192 MB heap is
+ * always free for the transient allocations of a decode.
  *
  * `getMemoryClass()` reports the per-process heap limit, so no `largeHeap` is needed
  * and none is requested — the manifest stays default.

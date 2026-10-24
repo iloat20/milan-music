@@ -25,6 +25,15 @@ data class Track(
      * rewritten on the next scan.
      */
     val dateModified: Long = 0L,
+    /**
+     * MediaStore `ALBUM_ARTIST`, or empty when the provider does not expose it
+     * (API < 30) or the file has no album-artist tag.
+     *
+     * Appended last with a default so caches written before this field existed still
+     * decode; readers fall back to [artist] when it is blank, which is the right
+     * answer for the single-artist albums that make up most libraries.
+     */
+    val albumArtist: String = "",
 ) {
     companion object {
         /**

@@ -34,6 +34,10 @@
     <string name="library_empty_title">这里还没有歌曲</string>
     <string name="library_empty_body">把音频文件放到手机的 Music 目录，或稍后重新扫描音乐库。</string>
     <string name="library_rescanning">正在重新扫描曲库</string>
+    <string name="library_root_title">音乐库</string>
+    <string name="library_songs_title">歌曲</string>
+    <string name="library_albums_title">专辑</string>
+    <string name="library_artists_title">艺人</string>
     <string name="player_nothing_playing">未在播放</string>
 
     <!-- 权限门槛 -->

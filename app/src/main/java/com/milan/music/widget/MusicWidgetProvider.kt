@@ -94,10 +94,23 @@ class MusicWidgetProvider : AppWidgetProvider() {
 
                     if (player.state.value.queueSize == 0) {
                         val tracks = app.container.libraryCache.load()
-                        if (tracks.isNotEmpty()) {
-                            val index = Random.nextInt(tracks.size)
-                            // Controller calls are main-thread bound; see PlayerController.
-                            withContext(Dispatchers.Main) { player.playQueue(tracks, index) }
+                        val restored = app.container.playbackSnapshot.restore(tracks)
+                        // Controller calls are main-thread bound; see PlayerController.
+                        withContext(Dispatchers.Main) {
+                            if (restored != null) {
+                                player.playQueue(
+                                    tracks = restored.tracks,
+                                    startIndex = restored.startIndex,
+                                    startPositionMs = restored.positionMs,
+                                    shuffle = restored.shuffleModeEnabled,
+                                    repeatMode = restored.repeatMode,
+                                    // The user pressed play, so this path overrides a
+                                    // paused snapshot deliberately.
+                                    autoPlay = true,
+                                )
+                            } else if (tracks.isNotEmpty()) {
+                                player.playQueue(tracks, Random.nextInt(tracks.size))
+                            }
                         }
                     } else {
                         withContext(Dispatchers.Main) { player.togglePlayPause() }

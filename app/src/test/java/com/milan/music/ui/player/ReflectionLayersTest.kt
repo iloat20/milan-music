@@ -136,16 +136,18 @@ class ReflectionLayersTest {
 
     @Test
     fun `the reflection is short enough to not repeat the cover`() {
-        // 倒影是封面的镜像，内容必然重复，重复多少由**可见长度**决定。150dp 时翻下去
-        // 的是封面最后三分之一的红领与暗部，够认人 —— 2026-10-23 真机用户原话
-        // "为什么封面出现了两次"。收到 104dp（封面高度的四分之一）之后只剩衬衫下摆
-        // 和背景，读成"封面底下透出的一层光"。
-        assertEquals("倒影可见长度", 104.dp, FadeEnd)
+        // 倒影是封面的镜像，内容必然重复，重复多少由**可见长度**决定。第 57 批从
+        // 150dp 收到 104dp 是为了压掉"第二张封面"；2026-10-24 按用户指定放宽到
+        // 128dp，让镜下多出 24dp 封面末段，同时与 128dp 过渡带等长。
+        //
+        // 这条不再断言"四分之一"，只守两条底线：字面值必须是 128dp；仍然远短于
+        // 整幅倒影，不能把封面中段翻下来。
+        assertEquals("倒影可见长度", 128.dp, FadeEnd)
         assertTrue("必须远短于整幅倒影（$height）", FadeEnd * 2 < height)
         // 贴近镜面线那一段必须是满的（"和封面相近的倒影清楚一点"）。
         assertEquals("FadeHold 处仍要满", 1f, fadeAt(FadeHold, height), 1e-4f)
         assertEquals("镜下 24dp 仍要满", 1f, fadeAt(24.dp, height), 1e-4f)
-        // 镜下 104dp 已经是色场：再往下的每一行都不该有倒影。
+        // 镜下 128dp 已经是色场：再往下的每一行都不该有倒影。
         for (y in listOf(FadeEnd, FadeEnd + 40.dp, FadeEnd + 120.dp, height)) {
             assertEquals("$y 处不该还有倒影", 0f, fadeAt(y, height), 1e-4f)
         }
@@ -336,12 +338,12 @@ class ReflectionLayersTest {
     }
 
     @Test
-    fun `the visible reflection stays inside the plain bottom band`() {
-        // 设计不变量：可见倒影最多吃封面高度的四分之一。超过这个比例，翻下去的
-        // 就轮到红领、脸和 logo —— 又变成"第二张封面"。
+    fun `the visible reflection stays within a third of the hero`() {
+        // 设计不变量（844dp 参考屏）：可见倒影不超过封面高度的三分之一。超过这个
+        // 比例，翻下去的就不只是封面末段，会重新读出"第二张封面"。
         val hero = CoverLayout.heroHeight(844.dp, 300.dp)
         val share = FadeEnd.value / hero.value
-        assertTrue("可见倒影占封面 $share（应 ≤ 0.26）", share <= 0.26f)
+        assertTrue("可见倒影占封面 $share（应 ≤ 1/3）", share <= 1f / 3f)
     }
 
     @Test

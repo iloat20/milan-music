@@ -95,6 +95,7 @@ import com.milan.music.di.AppContainer
 import com.milan.music.ui.components.MiniPlayer
 import com.milan.music.ui.components.SearchGlyph
 import com.milan.music.ui.components.SortGlyph
+import com.milan.music.ui.components.shouldAnimatePlayingBars
 import com.milan.music.ui.glass.GlassSurface
 import com.milan.music.ui.text.labelText
 import com.milan.music.ui.theme.LocalGlassColors
@@ -122,6 +123,12 @@ private val SearchFieldOverlayHeight = 66.dp
 fun HomeScreen(
     container: AppContainer,
     onOpenPlayer: () -> Unit,
+    /**
+     * True while the player sheet covers this screen. The list stays composed for the
+     * swipe-down hand-off, but its infinite now-playing animation must not keep
+     * drawing behind an opaque page.
+     */
+    isCovered: Boolean = false,
 ) {
     val context = LocalContext.current
     val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(container))
@@ -230,16 +237,34 @@ fun HomeScreen(
     // 里把 shuffleModeEnabled 钉成 true）。这是产品意图——打开应用就开始放音乐，
     // 不是"用户点了才响"。
     //
-    // `autoStarted` 用 rememberSaveable：进程没死时（配置变更、从播放页返回）不重播，
-    // 进程重建才重播，符合"打开应用就开始放"的直觉。
+    // 进程被系统杀掉后，快照优先：先恢复上次的队列、当前曲目和位置；只有快照不可用
+    // （首次启动、曲目全被删）才退回随机。`autoPlay = wasPlaying` 是"打开即播"的唯一
+    // 例外——上次是暂停状态时，冷启动不应该突然出声。
+    //
+    // `autoStarted` 用 remember 而不是 rememberSaveable：配置变更时控制器是
+    // application 级的，`queueSize` 仍非零，effect 会直接返回；进程死亡后 remember
+    // 归零，才会真正走快照恢复。rememberSaveable 会把 true 带过进程死亡（系统恢复
+    // Activity 状态时），反而让恢复路径永远不执行。
     //
     // 代价不在这一页：控制器是 bound client，一旦绑定，播放服务就随**进程**存活而不是
     // 随 UI，`PlayerController.onUiStopped` 的 release 分支因此走不到。那段 KDoc 里有账。
-    var autoStarted by rememberSaveable { mutableStateOf(false) }
+    var autoStarted by remember { mutableStateOf(false) }
     LaunchedEffect(hasAudioPermission, state.tracks.isNotEmpty()) {
         if (!hasAudioPermission || state.tracks.isEmpty() || autoStarted) return@LaunchedEffect
         autoStarted = true
-        if (container.player.state.value.queueSize == 0) {
+        if (container.player.state.value.queueSize != 0) return@LaunchedEffect
+
+        val restored = container.playbackSnapshot.restore(state.tracks)
+        if (restored != null) {
+            container.player.playQueue(
+                tracks = restored.tracks,
+                startIndex = restored.startIndex,
+                startPositionMs = restored.positionMs,
+                shuffle = restored.shuffleModeEnabled,
+                repeatMode = restored.repeatMode,
+                autoPlay = restored.wasPlaying,
+            )
+        } else {
             container.player.playQueue(
                 state.tracks,
                 Random.nextInt(state.tracks.size),
@@ -279,7 +304,7 @@ fun HomeScreen(
                     tracks = if (tab == 0) state.tracks else state.favorites,
                     artworkRepository = container.artwork,
                     currentTrackId = playerState.currentTrack?.id,
-                    isPlaying = playerState.isPlaying,
+                    isPlaying = shouldAnimatePlayingBars(playerState.isPlaying, isCovered),
                     favoriteIds = favoriteIds,
                     onPlay = playList,
                     onToggleFavorite = viewModel::toggleFavorite,

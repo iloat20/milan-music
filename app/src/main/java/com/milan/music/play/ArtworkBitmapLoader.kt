@@ -56,11 +56,12 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
      * their real allocation, not by `w * h * 4`: `loadThumbnail` may return a
      * HARDWARE bitmap whose footprint that formula does not describe.
      *
-     * Sized from the same heap-derived budget as the in-app caches (3/16 of the
-     * total): 512 px covers are 1 MB each, so a fixed 8 MB ceiling held eight of them
-     * regardless of whether the device could afford it.
+     * Sized from the same heap-derived budget as the in-app caches (5/32 of the
+     * total): 512 px covers are ~1 MB each, so the slice holds three of them plus a
+     * little slack. A fixed 8 MB ceiling held eight regardless of whether the device
+     * could afford it.
      */
-    private val cache = object : LruCache<Uri, Bitmap>(BitmapBudget.slice(budget, 3, 16)) {
+    private val cache = object : LruCache<Uri, Bitmap>(BitmapBudget.slice(budget, 5, 32)) {
         override fun sizeOf(key: Uri, value: Bitmap): Int = value.allocationByteCount
     }
 

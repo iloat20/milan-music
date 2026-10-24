@@ -24,7 +24,8 @@ class MediaStoreRepository(private val context: Context) {
 
     private val collection: Uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
 
-    private val projection = arrayOf(
+    /** Columns every supported provider exposes. */
+    private val baseProjection = arrayOf(
         MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.TITLE,
         MediaStore.Audio.Media.ARTIST,
@@ -38,72 +39,125 @@ class MediaStoreRepository(private val context: Context) {
         MediaStore.Audio.Media.DATE_MODIFIED,
     )
 
+    /** `ALBUM_ARTIST` arrived with the R media columns, and not every OEM backport kept it. */
+    private val richProjection = baseProjection + MediaStore.Audio.Media.ALBUM_ARTIST
+
+    private fun projection(includeAlbumArtist: Boolean): Array<String> =
+        if (includeAlbumArtist) richProjection else baseProjection
+
     private val selection =
         "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} >= $MIN_DURATION_MS"
 
-    suspend fun loadTracks(): List<Track> = withContext(Dispatchers.IO) {
+    /**
+     * Reads the indexed audio library, telling "empty" apart from "interrupted".
+     *
+     * [TrackScan.complete] is the part the caller must honour. The previous shape
+     * returned a plain list, so a cursor that threw halfway looked like a successful
+     * scan of a shorter library: the partial rows replaced the cached snapshot and
+     * were stamped with the current generation, hiding the missing tracks until the
+     * next index change. [complete] is only true after the cursor has been walked to
+     * the end, so a partial read can never be persisted as authoritative.
+     *
+     * Failures still do not crash the launch path: the rows read so far are returned
+     * for diagnostics, with `complete = false`.
+     */
+    internal suspend fun scanTracks(): TrackScan = withContext(Dispatchers.IO) {
         val tracks = ArrayList<Track>(256)
-        val sortOrder = "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+        var complete = false
+        var includeAlbumArtist = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
         try {
-            context.contentResolver.query(collection, projection, selection, null, sortOrder)?.use { cursor ->
-                val idCol = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
-                val titleCol = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE)
-                val artistCol = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST)
-                val albumCol = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM)
-                val albumIdCol = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
-                val durationCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
-                val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
-                val yearCol = cursor.getColumnIndex(MediaStore.Audio.Media.YEAR)
-                val trackCol = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
-                val dateCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
-                val modifiedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
+            val cursor = try {
+                query(includeAlbumArtist)
+            } catch (e: IllegalArgumentException) {
+                // Some OEM providers reject the optional column outright. Retry only
+                // before any row has been read: retrying after a partial walk could
+                // duplicate rows, and the outer catch already marks that case
+                // incomplete.
+                if (!includeAlbumArtist) throw e
+                Log.w(TAG, "provider rejected ALBUM_ARTIST; retrying without it", e)
+                includeAlbumArtist = false
+                query(false)
+            }
+            if (cursor == null) {
+                Log.w(TAG, "audio provider returned no cursor after ${tracks.size} rows")
+            } else {
+                cursor.use { reader ->
+                    val idCol = reader.getColumnIndex(MediaStore.Audio.Media._ID)
+                    val titleCol = reader.getColumnIndex(MediaStore.Audio.Media.TITLE)
+                    val artistCol = reader.getColumnIndex(MediaStore.Audio.Media.ARTIST)
+                    val albumArtistCol = if (includeAlbumArtist) {
+                        reader.getColumnIndex(MediaStore.Audio.Media.ALBUM_ARTIST)
+                    } else {
+                        -1
+                    }
+                    val albumCol = reader.getColumnIndex(MediaStore.Audio.Media.ALBUM)
+                    val albumIdCol = reader.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
+                    val durationCol = reader.getColumnIndex(MediaStore.Audio.Media.DURATION)
+                    val sizeCol = reader.getColumnIndex(MediaStore.Audio.Media.SIZE)
+                    val yearCol = reader.getColumnIndex(MediaStore.Audio.Media.YEAR)
+                    val trackCol = reader.getColumnIndex(MediaStore.Audio.Media.TRACK)
+                    val dateCol = reader.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
+                    val modifiedCol = reader.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
 
-                while (cursor.moveToNext()) {
-                    val id = cursor.longAt(idCol)
-                    if (id <= 0L) continue
-                    tracks += Track(
-                        id = id,
-                        uri = ContentUris.withAppendedId(collection, id),
-                        title = cursor.stringAt(titleCol),
-                        artist = cursor.stringAt(artistCol),
-                        album = cursor.stringAt(albumCol),
-                        albumId = cursor.longAt(albumIdCol),
-                        duration = cursor.longAt(durationCol),
-                        sizeBytes = cursor.longAt(sizeCol),
-                        year = cursor.intAt(yearCol),
-                        trackNumber = cursor.intAt(trackCol),
-                        dateAdded = cursor.longAt(dateCol),
-                        dateModified = cursor.longAt(modifiedCol),
-                    )
+                    while (reader.moveToNext()) {
+                        val id = reader.longAt(idCol)
+                        if (id <= 0L) continue
+                        val artist = reader.stringAt(artistCol)
+                        tracks += Track(
+                            id = id,
+                            uri = ContentUris.withAppendedId(collection, id),
+                            title = reader.stringAt(titleCol),
+                            artist = artist,
+                            album = reader.stringAt(albumCol),
+                            albumId = reader.longAt(albumIdCol),
+                            duration = reader.longAt(durationCol),
+                            sizeBytes = reader.longAt(sizeCol),
+                            year = reader.intAt(yearCol),
+                            trackNumber = reader.intAt(trackCol),
+                            dateAdded = reader.longAt(dateCol),
+                            dateModified = reader.longAt(modifiedCol),
+                            albumArtist = reader.stringAt(albumArtistCol).ifEmpty { artist },
+                        )
+                    }
                 }
+                complete = true
             }
         } catch (e: SecurityException) {
             // Permission revoked between the check and the query.
             Log.w(TAG, "audio query rejected: permission revoked", e)
         } catch (e: CancellationException) {
             // Cancellation is not a provider failure, and this catch must never turn it
-            // into one: the caller treats a returned list as a complete snapshot and
-            // writes it to the cache (`LibraryViewModel.scan` → `libraryCache.save`),
-            // so a swallowed cancellation would persist a half-read library that the
-            // next launch then trusts, because it is stamped as current.
-            //
-            // Unreachable today: the block below contains no suspension point, and
-            // coroutine cancellation is only delivered where a coroutine checks for it.
-            // It stays because adding one `suspend` call inside that try is an easy,
-            // innocent-looking edit, and this branch is what keeps it safe.
+            // into one: a returned list could otherwise be written to the cache, so a
+            // swallowed cancellation would persist a half-read library that the next
+            // launch trusts because it is stamped as current.
             throw e
         } catch (e: Exception) {
             // The cursor runs against a remote provider, and OEM implementations throw
             // more than the two cases that used to be listed here:
             // IllegalArgumentException for a rejected projection, SQLiteException for a
             // corrupted or rebuilding index, DeadObjectException when MediaProvider is
-            // restarted mid-cursor. None of them is actionable at this level and none
-            // should reach the caller as a crash on the launch path — the caller treats
-            // an empty result as "index unavailable" and keeps the cached snapshot.
-            Log.w(TAG, "audio query failed; returning what was read", e)
+            // restarted mid-cursor. None of them is actionable at this level; the
+            // caller keeps the cached snapshot because `complete` stays false.
+            Log.w(TAG, "audio query failed after ${tracks.size} rows", e)
         }
-        tracks
+        if (!complete) {
+            Log.w(
+                TAG,
+                "audio scan incomplete after ${tracks.size} rows; " +
+                    "the cached snapshot must not be replaced",
+            )
+        }
+        TrackScan(tracks = tracks, complete = complete)
     }
+
+    private fun query(includeAlbumArtist: Boolean): Cursor? =
+        context.contentResolver.query(
+            collection,
+            projection(includeAlbumArtist),
+            selection,
+            null,
+            "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC",
+        )
 
     /**
      * Watermark of the audio index, taken without reading a single track row.
@@ -191,6 +245,18 @@ class MediaStoreRepository(private val context: Context) {
         )
     }
 }
+
+/**
+ * One pass over the audio index.
+ *
+ * [complete] is false when the provider failed before the cursor reached its end. The
+ * rows in [tracks] are then a prefix, not a library: callers must keep the cached
+ * snapshot rather than publishing or stamping this result.
+ */
+internal data class TrackScan(
+    val tracks: List<Track>,
+    val complete: Boolean,
+)
 
 /**
  * Identity of a MediaStore snapshot.

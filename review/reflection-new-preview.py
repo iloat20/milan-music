@@ -2,8 +2,10 @@
 
 映射与生产代码 `coverRowAt()` 逐字对应：
     节点第 y 行 -> 封面框第  (y <= band) ? hero - band + y : hero - (y - band)  行
-模糊用阶梯（12/22/34dp），衰减 FadeHold=24dp → FadeEnd=104dp，压暗 0.26。
+模糊用阶梯（12/22/34dp），衰减 FadeHold=24dp → FadeEnd=128dp，压暗 0.26。
 """
+import os
+
 from PIL import Image, ImageFilter, ImageDraw
 
 SHOT = r"C:/Users/Administrator/.workbuddy/clipboard-images/clipboard-2026-10-23T05-31-21-209Z-2a16b092.jpg"
@@ -15,7 +17,9 @@ BAND = 128 * DP                     # 286.5
 MIRROR = HERO                       # min(reflectionHeight, hero)
 NODE = BAND + MIRROR
 HOLD = 24 * DP
-END = 104 * DP
+# 默认跟随生产值；对照旧规格时传 REFLECTION_END_DP=104。
+END_DP = float(os.environ.get("REFLECTION_END_DP", "128"))
+END = END_DP * DP
 SCRIM_MAX = 0.26
 SCRIM_AT = 0.45 * 150 * DP          # 压暗到满值的位置（沿用生产口径的一半）
 
@@ -116,6 +120,10 @@ canvas.paste(b, (0, bot - top + 8))
 d = ImageDraw.Draw(canvas)
 d.rectangle((0, 0, W, 16), fill=(0, 0, 0)); d.text((6, 3), "NOW (device)", fill=(255, 80, 80))
 d.rectangle((0, bot - top + 8, W, bot - top + 24), fill=(0, 0, 0))
-d.text((6, bot - top + 11), "NEW (exact mirror, 104dp)", fill=(0, 220, 120))
+d.text(
+    (6, bot - top + 11),
+    f"NEW (exact mirror, {END_DP:.0f}dp)",
+    fill=(0, 220, 120),
+)
 canvas.save("review/cmp-new-vs-device.png")
 print("ok", canvas.size)

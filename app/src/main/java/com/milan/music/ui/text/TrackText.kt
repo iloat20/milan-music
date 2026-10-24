@@ -36,6 +36,15 @@ fun Track.titleText(context: Context): String =
 fun Track.artistText(context: Context): String =
     artist.takeIf { it.isKnownTag() } ?: context.getString(R.string.track_unknown_artist)
 
+/**
+ * 专辑艺人，缺失时退回 [artist]。
+ *
+ * 单艺人专辑占绝大多数，而系统 UI（Android Auto、锁屏）读 `albumArtist` 是为了归类。
+ * 直接给空串会让这些界面拿不到艺人名，所以缺省值取 `artist`。
+ */
+fun Track.albumArtistText(context: Context): String =
+    albumArtist.takeIf { it.isKnownTag() } ?: artistText(context)
+
 fun Track.albumText(context: Context): String =
     album.takeIf { it.isKnownTag() } ?: context.getString(R.string.track_unknown_album)
 

@@ -50,6 +50,18 @@ class PlaybackTrackIndex {
         tracks.forEach { byId[it.id.toString()] = it }
     }
 
+    /**
+     * Adds one track without disturbing the rest of the index.
+     *
+     * Used when playback was started outside the app (a library browser, or the
+     * system resuming a queue after process death): the controller never saw a
+     * `playQueue` call, so it has no list of its own, but the session can still hand
+     * it the identity behind each `mediaId`.
+     */
+    fun put(track: Track) {
+        byId[track.id.toString()] = track
+    }
+
     /** The track for a `mediaId`, or null when the queue no longer contains it. */
     fun get(mediaId: String?): Track? = mediaId?.let(byId::get)
 }
