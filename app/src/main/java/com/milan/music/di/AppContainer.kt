@@ -8,6 +8,7 @@ import com.milan.music.data.media.MediaStoreRepository
 import com.milan.music.data.prefs.SettingsStore
 import com.milan.music.data.userdata.UserDataStore
 import com.milan.music.play.PlaybackSnapshotStore
+import com.milan.music.play.PlaybackStartGate
 import com.milan.music.play.PlaybackTrackIndex
 import com.milan.music.play.PlayerController
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +36,12 @@ class AppContainer(context: Context) {
      * [com.milan.music.play.PlaybackService] knows when its cached grouping is stale.
      */
     val libraryRevision = LibraryRevision()
+
+    /**
+     * Set once a track is actually audible, read by the library before it starts a
+     * background reconcile. See [com.milan.music.play.PlaybackStartGate].
+     */
+    val playbackStartGate = PlaybackStartGate()
 
     /** Queue/position snapshot shared by the controller, the service and the widget. */
     val playbackSnapshot = PlaybackSnapshotStore(appContext)

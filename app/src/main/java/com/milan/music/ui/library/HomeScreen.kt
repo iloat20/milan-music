@@ -61,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -129,6 +130,8 @@ fun HomeScreen(
      * drawing behind an opaque page.
      */
     isCovered: Boolean = false,
+    /** Monotonic id of an explicit "play" request from the home-screen widget. */
+    playRequest: Long = 0L,
 ) {
     val context = LocalContext.current
     val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(container))
@@ -249,10 +252,22 @@ fun HomeScreen(
     // 代价不在这一页：控制器是 bound client，一旦绑定，播放服务就随**进程**存活而不是
     // 随 UI，`PlayerController.onUiStopped` 的 release 分支因此走不到。那段 KDoc 里有账。
     var autoStarted by remember { mutableStateOf(false) }
-    LaunchedEffect(hasAudioPermission, state.tracks.isNotEmpty()) {
-        if (!hasAudioPermission || state.tracks.isEmpty() || autoStarted) return@LaunchedEffect
+    // The widget's play tap is one-shot. Without this watermark the request would
+    // stay "new" forever and the effect would restart playback after every library
+    // refresh, including immediately after the user paused.
+    var handledPlayRequest by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(hasAudioPermission, state.tracks.isNotEmpty(), playRequest) {
+        if (!hasAudioPermission || state.tracks.isEmpty()) return@LaunchedEffect
+        val decision = decidePlaybackStart(playRequest, handledPlayRequest, autoStarted)
+        if (!decision.proceed) return@LaunchedEffect
+        if (decision.explicitPlay) handledPlayRequest = playRequest
         autoStarted = true
-        if (container.player.state.value.queueSize != 0) return@LaunchedEffect
+        val explicitPlay = decision.explicitPlay
+        if (container.player.state.value.queueSize != 0) {
+            // The app was already alive when the widget requested play.
+            if (explicitPlay) container.player.play()
+            return@LaunchedEffect
+        }
 
         val restored = container.playbackSnapshot.restore(state.tracks)
         if (restored != null) {
@@ -262,7 +277,8 @@ fun HomeScreen(
                 startPositionMs = restored.positionMs,
                 shuffle = restored.shuffleModeEnabled,
                 repeatMode = restored.repeatMode,
-                autoPlay = restored.wasPlaying,
+                // A widget play tap overrides a paused snapshot.
+                autoPlay = explicitPlay || restored.wasPlaying,
             )
         } else {
             container.player.playQueue(

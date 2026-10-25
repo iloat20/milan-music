@@ -1,6 +1,8 @@
 package com.milan.music
 
 import android.app.Application
+import com.milan.music.diag.ExitReasonReporter
+import com.milan.music.diag.MemoryBaseline
 import com.milan.music.di.AppContainer
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeFeatureFlags
@@ -36,6 +38,10 @@ class MilanMusicApp : Application() {
         // have moved the same cost earlier and added a second connect path next to
         // PlayerController's `pendingAction`. What that means for teardown is
         // documented on PlayerController.onUiStopped.
+
+        // 上一次进程是被什么杀掉的。只在 API 30+ 有效，读取与去重都在 IO 线程上，
+        // 这里不等结果。见 ExitReasonReporter。
+        ExitReasonReporter.reportAsync(this)
     }
 
     /**
@@ -50,6 +56,9 @@ class MilanMusicApp : Application() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         container.artwork.onTrimMemory(level)
+        // 同一档位顺手记一行基线：Android 17 的内存限制器杀进程不留堆栈，这些行
+        // 是事后唯一能说明"被杀前吃了多少"的证据。档位过滤在 record 内部完成。
+        MemoryBaseline.record(level)
     }
 
     /** Legacy signal (no level): free everything. */

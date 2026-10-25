@@ -9,12 +9,16 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.milan.music.data.media.LibraryCacheStore
 import com.milan.music.data.media.LibraryRevision
 import com.milan.music.data.media.MediaStoreRepository
+import com.milan.music.data.media.SCAN_DEFER_TIMEOUT_MS
+import com.milan.music.data.media.ScanMode
+import com.milan.music.data.media.scanPlanFor
 import com.milan.music.data.model.SortMode
 import com.milan.music.data.model.Track
 import com.milan.music.data.prefs.SettingsStore
 import com.milan.music.data.userdata.UserData
 import com.milan.music.data.userdata.UserDataStore
 import com.milan.music.di.AppContainer
+import com.milan.music.play.PlaybackStartGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -64,6 +68,7 @@ class LibraryViewModel(
     private val userData: UserDataStore,
     private val settings: SettingsStore,
     private val libraryRevision: LibraryRevision,
+    private val playbackStartGate: PlaybackStartGate,
 ) : ViewModel() {
 
     private val allTracks = MutableStateFlow<List<Track>>(emptyList())
@@ -205,7 +210,17 @@ class LibraryViewModel(
                 }
             }
 
-            val scan = mediaStore.scanTracks()
+            // The cached rows are already on screen, so what follows is invisible work
+            // that would otherwise open a second stream of binder and flash traffic
+            // while the first track is still filling its buffer. [ScanPlan] decides how
+            // far it steps back; with no cache it does not step back at all, because
+            // then the scan *is* the first paint.
+            val plan = scanPlanFor(hasCachedRows = cached.isNotEmpty())
+            if (plan.waitForPlayback) {
+                val audible = playbackStartGate.awaitAudible(SCAN_DEFER_TIMEOUT_MS)
+                Log.i(TAG, "reconcile scan deferred audible=$audible")
+            }
+            val scan = mediaStore.scanTracks(plan.mode)
 
             // Two cases must leave the cached library alone: an interrupted cursor
             // (partial rows) and a transiently empty provider. Both are indistinguishable
@@ -284,7 +299,9 @@ class LibraryViewModel(
         // that lands mid-scan forces the next launch to rescan rather than going
         // unnoticed.
         val stamp = mediaStore.stamp()
-        val scan = mediaStore.scanTracks()
+        // Always interactive: the user asked for this one and is watching the list, so
+        // neither the lower priority nor the wait for playback applies.
+        val scan = mediaStore.scanTracks(ScanMode.INTERACTIVE)
         // The explicit-refresh path needs the same guard as [ensureLoaded], and it is
         // the path that runs when the user already believes something is wrong. Neither
         // a partial cursor nor a provider that answers with zero rows while it rebuilds
@@ -328,6 +345,7 @@ class LibraryViewModel(
                     container.userData,
                     container.settings,
                     container.libraryRevision,
+                    container.playbackStartGate,
                 )
             }
         }

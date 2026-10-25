@@ -196,6 +196,45 @@ class PlaybackSnapshotStore(context: Context) {
     }
 
     /**
+     * Cursor-only write for a track change.
+     *
+     * The queue itself did not change, so `track_ids` is deliberately left alone: on a
+     * 1 233-track library re-encoding that string is ~12 KB per transition, and every
+     * DataStore edit rewrites the whole file atomically. Only the index, the current
+     * item's metadata and the position move.
+     *
+     * The index is meaningless without the ids it indexes, so this must never run
+     * before [saveQueue] has landed at least once — [QueueSnapshotPolicy] guarantees
+     * that ordering by forcing the first write to be [QueueSnapshotScope.FULL].
+     */
+    suspend fun saveCursor(
+        currentIndex: Int,
+        current: SnapshotTrack?,
+        positionMs: Long,
+        shuffleModeEnabled: Boolean,
+        repeatMode: Int,
+        wasPlaying: Boolean,
+        updatedAtMs: Long,
+    ) = withContext(Dispatchers.IO) {
+        val encoded = current?.let { json.encodeToString(SnapshotTrack.serializer(), it) }
+        context.playbackQueueStore.edit { preferences ->
+            preferences[currentIndexKey] = currentIndex
+            if (encoded == null) {
+                preferences.remove(currentTrackKey)
+            } else {
+                preferences[currentTrackKey] = encoded
+            }
+            preferences[shuffleKey] = shuffleModeEnabled
+            preferences[repeatKey] = repeatMode
+            preferences[updatedAtKey] = updatedAtMs
+        }
+        context.playbackPositionStore.edit { preferences ->
+            preferences[positionKey] = positionMs.coerceAtLeast(0L)
+            preferences[wasPlayingKey] = wasPlaying
+        }
+    }
+
+    /**
      * Position plus the play/pause intent.
      *
      * Called on every `isPlaying` transition and on the fifteen-second ticker while

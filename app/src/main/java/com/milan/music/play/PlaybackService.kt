@@ -3,17 +3,21 @@ package com.milan.music.play
 import android.app.PendingIntent
 import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.upstream.DefaultAllocator
@@ -31,6 +35,9 @@ import com.milan.music.MilanMusicApp
 import com.milan.music.R
 import com.milan.music.data.model.Track
 import com.milan.music.di.AppContainer
+import com.milan.music.diag.AudioPipeline
+import com.milan.music.diag.classifyPlaybackFailure
+import com.milan.music.diag.stuckDetailOf
 import com.milan.music.ui.text.albumArtistText
 import com.milan.music.ui.text.albumText
 import com.milan.music.ui.text.artistText
@@ -85,6 +92,31 @@ class PlaybackService : MediaLibraryService() {
      * service dies; see [releaseBufferPool].
      */
     private var bufferAllocator: DefaultAllocator? = null
+
+    /**
+     * 换曲/起播到真正出声的采样器。
+     *
+     * 起点由 [TrackStartProbe] 决定，而不是每次转场无条件打点；暂停快照的准备
+     * 不算启动，见该类的 KDoc。
+     */
+    private val trackStartProbe = TrackStartProbe()
+
+    /**
+     * Decides whether a snapshot write has to carry the id list.
+     *
+     * Lives next to [trackStartProbe] because both exist for the same reason: the
+     * player events are frequent enough that the naive implementation is measurable.
+     * See [QueueSnapshotPolicy].
+     */
+    private val queueSnapshotPolicy = QueueSnapshotPolicy()
+
+    /**
+     * Resolves the playing track's ReplayGain, lazily and off the main thread.
+     *
+     * Created in `onCreate` rather than per transition so the cache survives a skip
+     * back to a track that was already measured.
+     */
+    private var replayGainReader: ReplayGainReader? = null
 
     /**
      * Queue metadata, resolved on demand instead of shipped with every item.
@@ -403,9 +435,20 @@ class PlaybackService : MediaLibraryService() {
      * Called from player events, not from the UI's 500 ms progress ticker: the ticker
      * only runs while the player sheet is visible and is ten times faster than the
      * snapshot needs.
+     *
+     * [scope] is what keeps a track change cheap. `CURSOR` skips the id list entirely —
+     * see [QueueSnapshotPolicy] — so skipping through a 1 233-track library no longer
+     * re-encodes a 12 KB string and writes two files per track.
      */
-    private suspend fun persistQueue(player: Player) {
+    private suspend fun persistQueue(
+        player: Player,
+        scope: QueueSnapshotScope = QueueSnapshotScope.FULL,
+    ) {
         val store = snapshotStore ?: return
+        if (scope == QueueSnapshotScope.CURSOR) {
+            persistCursor(player, store)
+            return
+        }
         val count = player.mediaItemCount
         if (count == 0) return
         val ids = ArrayList<Long>(count)
@@ -431,7 +474,38 @@ class PlaybackService : MediaLibraryService() {
                 ),
             )
         }
-        if (saved) Log.d(TAG, "snapshot saved tracks=${ids.size} index=$current")
+        if (saved) {
+            // Acknowledgement, not attempt: a failed write leaves the structure dirty
+            // so the next transition retries the full form.
+            queueSnapshotPolicy.onIdsPersisted()
+            Log.d(TAG, "snapshot saved tracks=${ids.size} index=$current")
+        }
+    }
+
+    /**
+     * Track change: move the index and the position, leave the id list untouched.
+     *
+     * Guarded on `mediaItemCount` because `load()` rejects a snapshot with no ids — a
+     * cursor on top of an empty queue store would look like a corrupt snapshot rather
+     * than a missing one. When that happens the next event is forced to be full.
+     */
+    private suspend fun persistCursor(player: Player, store: PlaybackSnapshotStore) {
+        val count = player.mediaItemCount
+        val index = player.currentMediaItemIndex
+        if (count == 0 || index < 0 || index >= count) return
+        val saved = saveSnapshotSafely("cursor", ::logSnapshotFailure) {
+            store.saveCursor(
+                currentIndex = index,
+                current = player.currentMediaItem?.toSnapshotTrack(),
+                positionMs = player.currentPosition.coerceAtLeast(0L),
+                shuffleModeEnabled = player.shuffleModeEnabled,
+                repeatMode = player.repeatMode,
+                wasPlaying = player.playWhenReady &&
+                    player.playbackState != Player.STATE_ENDED,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+        }
+        if (saved) Log.d(TAG, "snapshot cursor saved index=$index")
     }
 
     private suspend fun persistPosition(player: Player) {
@@ -577,6 +651,18 @@ class PlaybackService : MediaLibraryService() {
             // Hold a partial wake lock (WAKE_LOCK is declared) so playback keeps
             // running while the screen is off; without it some OEMs stall the
             // decoder thread once the device dozes.
+            //
+            // Media3 1.9 release notes say this is now the default and the call can
+            // be dropped. By value that is true in 1.11.1 — but only as a side
+            // effect: with `wakeModeSet == false`, `ExoPlayerImpl` enables the wake
+            // lock iff `Builder.experimentalEnableStuckPlayingDetection` is true,
+            // because the flag is what decides whether the four stuck-detection
+            // timeouts are finite. That is an *experimental* default standing in for
+            // a power contract: flipping it, or setting any single stuck timeout to
+            // MAX_VALUE, turns the wake lock off silently and the only symptom is
+            // playback stalling in doze. So the value stays explicit. This is also
+            // the app's only wake lock handling — no WakeLockManager, no manual
+            // acquire/release.
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -629,40 +715,112 @@ class PlaybackService : MediaLibraryService() {
                 ) {
                     Log.i(TAG, "audio decoder=$decoderName initMs=$initializationDurationMs")
                 }
+
+                /**
+                 * The format the renderer actually hands to `AudioTrack`.
+                 *
+                 * `setEnableAudioFloatOutput(true)` is a request; this line is the
+                 * result. `pcm=s16` on a 24-bit source means the flag was ignored on
+                 * this device, which is otherwise indistinguishable from it working.
+                 */
+                override fun onAudioInputFormatChanged(
+                    eventTime: AnalyticsListener.EventTime,
+                    format: Format,
+                    decoderReuseEvaluation: DecoderReuseEvaluation?,
+                ) {
+                    AudioPipeline.recordInput(
+                        sampleRate = format.sampleRate,
+                        channelCount = format.channelCount,
+                        pcmEncoding = format.pcmEncoding,
+                    )
+                }
+
+                /**
+                 * The only measurement behind the buffer parameters.
+                 *
+                 * `bufferMs` separates a short decoder hiccup from a storage stall, and
+                 * that distinction is what decides whether `MIN_BUFFER_MS` or the byte
+                 * cap is the term to change. Fires only on an actual underrun.
+                 */
+                override fun onAudioUnderrun(
+                    eventTime: AnalyticsListener.EventTime,
+                    bufferSize: Int,
+                    bufferSizeMs: Long,
+                    elapsedSinceLastFeedMs: Long,
+                ) {
+                    AudioPipeline.recordUnderrun(bufferSize, bufferSizeMs, elapsedSinceLastFeedMs)
+                }
             },
         )
 
         // Playback errors used to be silent: ExoPlayer stopped and the UI just
-        // looked "paused". Log the error code and position so recurring stops at
-        // a fixed timestamp can be attributed to a damaged spot in the file.
+        // looked "paused". The classification keeps them attributable: a stuck player
+        // arrives as ERROR_CODE_UNEXPECTED with a StuckPlayerException in its cause,
+        // and logging only the code would file it under "unknown" forever.
+        //
+        // Nothing here retries. ExoPlayer does not retry by itself either, and the one
+        // case where a retry would be actively harmful is exactly the one this
+        // classification exists for (see PlaybackFailure.autoRetryAllowed).
         player.addListener(object : Player.Listener {
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            override fun onPlayerError(error: PlaybackException) {
+                val failure = classifyPlaybackFailure(
+                    errorCodeName = error.errorCodeName,
+                    stuck = stuckDetailOf(error),
+                )
                 Log.e(
                     TAG,
-                    "playback error at pos=${player.currentPosition}ms " +
+                    "playback error ${failure.describe()} " +
+                        "autoRetry=${failure.autoRetryAllowed} " +
+                        "pos=${player.currentPosition}ms " +
                         "media=${player.currentMediaItem?.mediaId} " +
-                        "code=${error.errorCodeName} cause=${error.cause}",
+                        "cause=${error.cause}",
                 )
             }
         })
 
-        // Snapshot writes. Queue changes are rare (a tap, a scan-driven restore), so
-        // writing the whole id list there is cheap; the position gets its own five
-        // second ticker and a pause/play write, which is what survives a kill that
-        // arrives between track changes.
+        // Snapshot writes. Only a timeline change can move the item list itself, so only
+        // that path re-encodes every id; a track change writes the cursor. Before 1.0.67
+        // both did the full form, which on a 1 233-track library meant a ~12 KB string
+        // and two atomic file rewrites per transition — for an unchanged queue.
         player.addListener(object : Player.Listener {
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                queueSnapshotPolicy.onTimelineChanged()
                 serviceScope.launch { persistQueue(player) }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                trackStartProbe.onTransition(
+                    nowMs = SystemClock.elapsedRealtime(),
+                    playWhenReady = player.playWhenReady,
+                    isPlaying = player.isPlaying,
+                )?.let { reportTrackStart(it, player) }
+                // Evaluated on the callback thread, but persistCursor re-reads the index
+                // when the write actually runs: a queued full write from a timeline
+                // change arriving afterwards therefore cannot be undone by a stale cursor.
+                val scope = queueSnapshotPolicy.scopeForTransition()
                 serviceScope.launch {
-                    persistQueue(player)
+                    persistQueue(player, scope)
                     persistPosition(player)
                 }
+                serviceScope.launch { applyReplayGain(player) }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                trackStartProbe.onPlayWhenReadyChanged(
+                    playWhenReady = playWhenReady,
+                    nowMs = SystemClock.elapsedRealtime(),
+                )
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    trackStartProbe.onIsPlayingChanged(SystemClock.elapsedRealtime())
+                        ?.let { reportTrackStart(it, player) }
+                    // The one signal the library waits for before it starts a background
+                    // reconcile: from here on the first track is audible and its buffer
+                    // must not be made to compete with a cursor walk.
+                    container?.playbackStartGate?.markAudible()
+                }
                 serviceScope.launch { persistPosition(player) }
             }
 
@@ -714,6 +872,39 @@ class PlaybackService : MediaLibraryService() {
             .build()
 
         startSnapshotTicker()
+        replayGainReader = ReplayGainReader(this)
+    }
+
+    /**
+     * Applies the current track's ReplayGain correction as a scalar volume.
+     *
+     * Only ever attenuates (see [gainToVolume]), so this cannot clip and needs no
+     * limiter. Untagged tracks are explicitly set back to unity: `Player.volume` is
+     * sticky across `setMediaItems`, so leaving the previous track's correction in
+     * place would keep a quiet track quiet for the whole album.
+     *
+     * The re-check after the read is load-bearing. Reading a tag takes a file open on
+     * the IO dispatcher, and the user can skip again inside that window; without the
+     * check the late value would scale whichever track is playing by then.
+     */
+    private suspend fun applyReplayGain(player: Player) {
+        val reader = replayGainReader ?: return
+        val mediaId = player.currentMediaItem?.mediaId ?: return
+        val track = trackIndex?.get(mediaId) ?: libraryTree?.cachedTrack(mediaId) ?: return
+        val startedAt = SystemClock.elapsedRealtime()
+        val gain = reader.gainFor(track)
+        if (player.currentMediaItem?.mediaId != mediaId) return
+        val readMs = SystemClock.elapsedRealtime() - startedAt
+        if (gain == null) {
+            player.volume = 1f
+            Log.i(TAG, "replaygain id=$mediaId untagged readMs=$readMs")
+            return
+        }
+        val volume = gainToVolume(gain)
+        player.volume = volume
+        // Volume is logged in thousandths: a float printout varies in length and the
+        // only thing worth comparing between runs is the third decimal.
+        Log.i(TAG, "replaygain id=$mediaId gain=${gain}dB volume=${(volume * 1000).toInt()} readMs=$readMs")
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
@@ -767,6 +958,17 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
+     * 记一行「起播请求/缓冲开始 → 出声」的耗时。
+     *
+     * 这是「要不要上分级预加载」的前置证据，也是唯一能证伪「切歌零缓冲」的数字。
+     * 本地文件的理论下限是几毫秒读盘加 10–50 ms 解码器初始化；实测贴着这个量级就
+     * 说明瓶颈已经不在数据供给，再叠一个预加载 player 只会多一份缓冲和一条回放线程。
+     */
+    private fun reportTrackStart(latencyMs: Long, player: Player) {
+        Log.i(TAG, "track start latency=${latencyMs}ms media=${player.currentMediaItem?.mediaId}")
+    }
+
+    /**
      * True while the queue is loaded and playback is actually going or about to start.
      *
      * `playWhenReady` alone is not enough: it stays `true` after the queue runs out
@@ -805,6 +1007,7 @@ class PlaybackService : MediaLibraryService() {
         }
         mediaSession = null
         libraryTree = null
+        replayGainReader = null
         releaseBufferPool()
         bufferAllocator = null
         artworkLoader?.release()

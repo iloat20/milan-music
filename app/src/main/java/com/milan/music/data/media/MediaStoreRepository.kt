@@ -5,13 +5,18 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Process
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.RequiresApi
 import com.milan.music.data.model.Track
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 
 /**
  * Reads the device audio library through [MediaStore].
@@ -61,7 +66,34 @@ class MediaStoreRepository(private val context: Context) {
      * Failures still do not crash the launch path: the rows read so far are returned
      * for diagnostics, with `complete = false`.
      */
-    internal suspend fun scanTracks(): TrackScan = withContext(Dispatchers.IO) {
+    internal suspend fun scanTracks(mode: ScanMode = ScanMode.INTERACTIVE): TrackScan =
+        withContext(scanDispatcher) {
+            // A dedicated thread, not `Dispatchers.IO`: the priority below belongs to
+            // this walk. On a shared pool it would follow the thread into whatever runs
+            // next on it (artwork decode, snapshot writes) and outlive the scan.
+            val restore = Process.getThreadPriority(Process.myTid())
+            Process.setThreadPriority(scanThreadPriority(mode))
+            val startedAt = SystemClock.elapsedRealtime()
+            val scan = try {
+                readAllIndex()
+            } finally {
+                // Back to this thread's own priority, so the next walk — which may be an
+                // interactive one — does not inherit the background priority of the
+                // previous reconcile.
+                Process.setThreadPriority(restore)
+            }
+            // The only evidence that separates "the reconcile cost nothing" from
+            // "the reconcile stalled behind playback" on a real device.
+            Log.i(
+                TAG,
+                "scan mode=$mode rows=${scan.tracks.size} complete=${scan.complete} " +
+                    "ms=${SystemClock.elapsedRealtime() - startedAt}",
+            )
+            scan
+        }
+
+    /** The cursor walk itself. Runs on the scan thread; see [scanTracks]. */
+    private fun readAllIndex(): TrackScan {
         val tracks = ArrayList<Track>(256)
         var complete = false
         var includeAlbumArtist = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
@@ -147,7 +179,7 @@ class MediaStoreRepository(private val context: Context) {
                     "the cached snapshot must not be replaced",
             )
         }
-        TrackScan(tracks = tracks, complete = complete)
+        return TrackScan(tracks = tracks, complete = complete)
     }
 
     private fun query(includeAlbumArtist: Boolean): Cursor? =
@@ -228,6 +260,19 @@ class MediaStoreRepository(private val context: Context) {
     companion object {
         private const val TAG = "MediaStoreRepo"
         private const val MIN_DURATION_MS = 60_000L
+
+        /**
+         * Single thread that owns every library cursor walk.
+         *
+         * It exists so that [scanThreadPriority] can be scoped to the scan: setting it
+         * on a `Dispatchers.IO` thread would apply to whatever that thread ran next. A
+         * daemon thread is correct here — nothing needs to be flushed on exit, and the
+         * process should not be kept alive for a reconcile.
+         */
+        private val scanDispatcher: CoroutineDispatcher =
+            Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "library-scan").apply { isDaemon = true }
+            }.asCoroutineDispatcher()
 
         /**
          * Volume names probed for a generation counter, in a fixed order so that

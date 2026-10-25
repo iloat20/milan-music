@@ -49,6 +49,16 @@ data class PlaybackProgress(
 )
 
 /**
+ * Whether leaving the UI may detach from the session.
+ *
+ * A queued action is not visible in [PlayerUiState.queueSize] until the controller
+ * binds. Releasing during that window clears the action and cancels the connection,
+ * which permanently loses the startup request.
+ */
+internal fun shouldReleaseOnUiStopped(queueSize: Int, pendingActionCount: Int): Boolean =
+    queueSize == 0 && pendingActionCount == 0
+
+/**
  * Thin Compose-facing wrapper around a [MediaController] bound to [PlaybackService].
  *
  * All controller calls must run on the main thread, therefore the injected scope
@@ -247,9 +257,13 @@ class PlayerController(
      * with `controller == null`, where [release] is already a no-op, so the condition
      * guards the invariant rather than producing an effect. It stays because the
      * invariant is what makes [release] safe to call from anywhere later.
+     *
+     * Pending actions are the exception: during the connect window the queue is not
+     * visible in [PlayerUiState] yet, so releasing on `queueSize == 0` would cancel
+     * the startup command and the connection that was about to execute it.
      */
     fun onUiStopped() {
-        if (_state.value.queueSize == 0) release()
+        if (shouldReleaseOnUiStopped(_state.value.queueSize, pendingActions.size)) release()
     }
 
     /**
@@ -320,6 +334,26 @@ class PlayerController(
             }
             mediaController.play()
         }
+        refresh()
+    }
+
+    /**
+     * Starts transport without toggling an already-playing queue.
+     *
+     * Used for the widget's explicit play request after it has opened the app. A
+     * toggle would pause if the snapshot restore had already started playback.
+     */
+    fun play() {
+        val mediaController = controller
+        if (mediaController == null) {
+            pendingActions.addLast { play() }
+            connect()
+            return
+        }
+        if (mediaController.playbackState == Player.STATE_IDLE) {
+            mediaController.prepare()
+        }
+        mediaController.play()
         refresh()
     }
 

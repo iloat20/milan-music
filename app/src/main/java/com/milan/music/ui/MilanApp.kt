@@ -27,7 +27,7 @@ import com.milan.music.ui.theme.MilanTheme
  * destination is not composed during a pop).
  */
 @Composable
-fun MilanApp(container: AppContainer) {
+fun MilanApp(container: AppContainer, playRequest: Long = 0L) {
     var playerOpen by remember { mutableStateOf(false) }
     // 容器只在这里出现一次：两个 ViewModel 从这里取依赖，UI 组件只收到状态和回调。
     val playerViewModel: PlayerViewModel = viewModel(factory = PlayerViewModel.factory(container))
@@ -38,6 +38,7 @@ fun MilanApp(container: AppContainer) {
                 container = container,
                 onOpenPlayer = { playerOpen = true },
                 isCovered = playerOpen,
+                playRequest = playRequest,
             )
 
             AnimatedVisibility(

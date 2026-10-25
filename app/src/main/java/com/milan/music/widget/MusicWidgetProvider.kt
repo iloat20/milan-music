@@ -29,7 +29,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.random.Random
 
 /**
  * 2×2 home screen widget: artwork, title and a play/pause toggle.
@@ -79,10 +78,12 @@ class MusicWidgetProvider : AppWidgetProvider() {
     }
 
     /**
-     * Toggle playback, or start one when there is nothing queued.
+     * Re-checks the live queue before executing the button's rendered action.
      *
-     * Without the empty-queue branch the button is dead on a cold start: the
-     * controller has zero media items, so `play()` has nothing to play.
+     * RemoteViews and its PendingIntent survive process death. A broadcast that was
+     * rendered as a toggle can therefore arrive in a new process whose queue is still
+     * empty; opening the activity is the only path that retains while-in-use playback
+     * capability after Android 17's background-audio hardening.
      */
     private fun handleToggle(context: Context) {
         val pending = goAsync()
@@ -91,29 +92,16 @@ class MusicWidgetProvider : AppWidgetProvider() {
                 runCatching {
                     val app = context.applicationContext as? MilanMusicApp ?: return@runCatching
                     val player = app.container.player
-
-                    if (player.state.value.queueSize == 0) {
-                        val tracks = app.container.libraryCache.load()
-                        val restored = app.container.playbackSnapshot.restore(tracks)
-                        // Controller calls are main-thread bound; see PlayerController.
-                        withContext(Dispatchers.Main) {
-                            if (restored != null) {
-                                player.playQueue(
-                                    tracks = restored.tracks,
-                                    startIndex = restored.startIndex,
-                                    startPositionMs = restored.positionMs,
-                                    shuffle = restored.shuffleModeEnabled,
-                                    repeatMode = restored.repeatMode,
-                                    // The user pressed play, so this path overrides a
-                                    // paused snapshot deliberately.
-                                    autoPlay = true,
-                                )
-                            } else if (tracks.isNotEmpty()) {
-                                player.playQueue(tracks, Random.nextInt(tracks.size))
-                            }
+                    when (widgetToggleAction(player.state.value.hasQueue)) {
+                        WidgetPlayAction.TOGGLE -> {
+                            // Controller calls are main-thread bound; see PlayerController.
+                            withContext(Dispatchers.Main) { player.togglePlayPause() }
                         }
-                    } else {
-                        withContext(Dispatchers.Main) { player.togglePlayPause() }
+
+                        WidgetPlayAction.OPEN_APP_AND_PLAY -> {
+                            Log.i(TAG, "toggle has no live queue: opening the app to play")
+                            openAppIntent(context, playOnStart = true).send()
+                        }
                     }
                 }.onFailure { Log.w(TAG, "toggle failed", it) }
             } finally {
@@ -147,7 +135,14 @@ class MusicWidgetProvider : AppWidgetProvider() {
         )
 
         views.setOnClickPendingIntent(R.id.widget_root, openAppIntent(context))
-        views.setOnClickPendingIntent(R.id.widget_play, toggleIntent(context))
+        // Cold start belongs to the visible activity: see [widgetPlayAction].
+        views.setOnClickPendingIntent(
+            R.id.widget_play,
+            when (widgetPlayAction(state.hasQueue)) {
+                WidgetPlayAction.TOGGLE -> toggleIntent(context)
+                WidgetPlayAction.OPEN_APP_AND_PLAY -> openAppIntent(context, playOnStart = true)
+            },
+        )
 
         manager.updateAppWidget(widgetId, views)
     }
@@ -254,10 +249,14 @@ class MusicWidgetProvider : AppWidgetProvider() {
         return output
     }
 
-    private fun openAppIntent(context: Context): PendingIntent {
+    private fun openAppIntent(context: Context, playOnStart: Boolean = false): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
+            .putExtra(MainActivity.EXTRA_PLAY_ON_START, playOnStart)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        return PendingIntent.getActivity(context, REQUEST_OPEN, intent, PENDING_FLAGS)
+        // Separate request codes: FLAG_UPDATE_CURRENT would otherwise make the play
+        // button's extra leak into the card-tap PendingIntent, or vice versa.
+        val requestCode = if (playOnStart) REQUEST_OPEN_PLAY else REQUEST_OPEN
+        return PendingIntent.getActivity(context, requestCode, intent, PENDING_FLAGS)
     }
 
     private fun toggleIntent(context: Context): PendingIntent {
@@ -295,6 +294,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
 
         private const val REQUEST_OPEN = 100
         private const val REQUEST_TOGGLE = 101
+        private const val REQUEST_OPEN_PLAY = 102
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
