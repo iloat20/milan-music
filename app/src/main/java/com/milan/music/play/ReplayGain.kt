@@ -235,6 +235,12 @@ internal object ReplayGainTags {
      * The terminator width follows the encoding: one byte for ISO-8859-1 and UTF-8, two
      * for UTF-16. Treating a UTF-16 description as single-byte text would split it at
      * the first zero byte of the BOM.
+     *
+     * A missing terminator is a malformed frame and returns null. The searches below
+     * report "not found" as `end`, so without the explicit check the value slice would
+     * have a negative length and `String(bytes, offset, length, charset)` would throw
+     * `StringIndexOutOfBoundsException`. That exception is not caught anywhere above
+     * this call: it would surface as a crash on the track-transition path.
      */
     private fun parseUserText(bytes: ByteArray, start: Int, end: Int): Pair<String, String>? {
         if (start >= end) return null
@@ -244,12 +250,14 @@ internal object ReplayGainTags {
             0, 3 -> {
                 val charset = if (encoding == 3) Charsets.UTF_8 else Charsets.ISO_8859_1
                 val split = indexOfZero(bytes, bodyStart, end)
+                if (split >= end) return null
                 val description = String(bytes, bodyStart, split - bodyStart, charset)
                 val value = String(bytes, split + 1, end - split - 1, charset)
                 description to value
             }
             1, 2 -> {
                 val split = indexOfDoubleZero(bytes, bodyStart, end)
+                if (split + 2 > end) return null
                 val description = String(
                     bytes,
                     bodyStart,

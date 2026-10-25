@@ -14,8 +14,8 @@ val Paper = Color(0xFFFAF3E1)
 val PaperDeep = Color(0xFFF1E6CD)
 val Cream = Color(0xFFFDF9EE)
 
-val Night = Color(0xFF141009)
-val NightRaised = Color(0xFF201A11)
+val Night = Color(0xFF110D07)
+val NightRaised = Color(0xFF1B150D)
 val NightMuted = Color(0xFFB5A88E)
 val Moonlight = Color(0xFFF8F1E2)
 
@@ -117,17 +117,29 @@ internal val LightHomeBackdrop = HomeBackdrop(
  * 0.94 在这个亮度区间只有 1~2 级差、肉眼读不出来）。三段 → `231A0C/171107/0E0A05`，
  * 顶部 0.0132 → 0.0112、首末差 0.0080（仍在，未塌成平涂）、均亮 0.0090 → 0.0068。
  * 没有压得更狠是因为再往下金色会先消失，整屏退化成纯黑，光晕也就白叠了。
+ *
+ * 2026-10-25「暗夜模式可以再暗点」：上一轮只压了底色，**光晕还是原强度**，而三枚光晕在
+ * 顶部叠成的金色雾才是整屏最亮处（顶部 L\* 10.0、实测截图左上明显泛亮）。所以这一轮
+ * 两个旋钮一起动，仍是 B 档：
+ *
+ *  - 底色 ×0.78 → `1E1609/130E05/0B0804`，顶部 0.0112 → 0.0087、均亮 0.0068 → 0.0053，
+ *    首末差 0.0062（渐变仍在）；
+ *  - 光晕 alpha ×0.60 → `0.11/0.09/0.08`（合计 0.46 → 0.28）。色相不动，仍是 `8A6C2A`
+ *    这组深金 —— 只压强度，这样"暗金"还在，只是不再糊成一片。
+ *
+ * 再往下（C 档 0.62 / 0.45）首末亮度差会掉到 0.0051 以下，渐变肉眼读不出来，等于
+ * 用"更黑"换掉"有暗金渐变"这个设计，所以没取。表面层同步走 ×0.75，见 `Theme.kt`。
  */
 internal val DarkHomeBackdrop = HomeBackdrop(
     stops = listOf(
-        0.00f to Color(0xFF231A0C),
-        0.50f to Color(0xFF171107),
-        1.00f to Color(0xFF0E0A05),
+        0.00f to Color(0xFF1E1609),
+        0.50f to Color(0xFF130E05),
+        1.00f to Color(0xFF0B0804),
     ),
     glows = listOf(
-        HomeGlow(Color(0xFF8A6C2A), 0.18f, 0.16f, 0.10f, 0.80f),
-        HomeGlow(Color(0xFF7A5F22), 0.15f, 0.92f, 0.28f, 0.64f),
-        HomeGlow(Color(0xFF6B521E), 0.13f, 0.42f, 0.86f, 0.74f),
+        HomeGlow(Color(0xFF8A6C2A), 0.11f, 0.16f, 0.10f, 0.80f),
+        HomeGlow(Color(0xFF7A5F22), 0.09f, 0.92f, 0.28f, 0.64f),
+        HomeGlow(Color(0xFF6B521E), 0.08f, 0.42f, 0.86f, 0.74f),
     ),
 )
 

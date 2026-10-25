@@ -339,6 +339,53 @@ class ReplayGainRobustnessTest {
     fun `a huge block length returns nothing`() {
         assertNull(ReplayGainTags.parse(flacWithBlockLength(Int.MAX_VALUE)))
     }
+
+    /**
+     * A `TXXX` frame without a null separator.
+     *
+     * The body layout is `encoding`, description, terminator, value. When the
+     * terminator is missing — a truncated frame, or a tag written by something that
+     * does not follow ID3 — the search for it returns the end of the frame, and
+     * `end - split - 1` becomes `-1`. `String(byte[], int, int, Charset)` throws
+     * `StringIndexOutOfBoundsException` for a negative length.
+     *
+     * This is reached from the playback transition path, not from a test-only
+     * entry point: a corrupt tag would crash the process the moment the track
+     * changed, because the parser runs outside the reader's try/catch.
+     */
+    @Test
+    fun `txxx without a terminator returns nothing`() {
+        assertNull(ReplayGainTags.parse(id3NoSeparator(encoding = 0)))
+    }
+
+    @Test
+    fun `utf16 txxx without a terminator returns nothing`() {
+        assertNull(ReplayGainTags.parse(id3NoSeparator(encoding = 1)))
+    }
+
+    /** An encoding byte the parser does not handle must not be read as ISO-8859-1. */
+    @Test
+    fun `an unknown txxx encoding returns nothing`() {
+        assertNull(ReplayGainTags.parse(id3NoSeparator(encoding = 9)))
+    }
+}
+
+private fun id3NoSeparator(encoding: Int): ByteArray {
+    // No zero byte anywhere in the body, so no terminator can be found.
+    val body = byteArrayOf(encoding.toByte()) + "REPLAYGAIN_TRACK_GAIN".toByteArray()
+    val bodySize = body.size
+    return ByteArrayOutputStream().apply {
+        write("ID3".toByteArray())
+        write(3)
+        write(0)
+        write(0)
+        write(syncSafe(10 + bodySize))
+        write("TXXX".toByteArray())
+        writeBe32(bodySize)
+        write(0)
+        write(0)
+        write(body)
+    }.toByteArray()
 }
 
 private fun flacWithBlockLength(blockLength: Int): ByteArray = ByteArrayOutputStream().apply {

@@ -33,7 +33,7 @@ class IconGlyphTest {
             1e-6f,
         )
         assertTrue(
-            "深色次层是 $dark，不得低于 0.70：Night 是 0xFF141009，低 alpha 叠上去直接消失。",
+            "深色次层是 $dark，不得低于 0.70：Night 已压到 0xFF110D07，低 alpha 叠上去直接消失。",
             dark >= 0.70f,
         )
         assertTrue(

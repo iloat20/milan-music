@@ -30,10 +30,24 @@ private val LightColors = lightColorScheme(
     onError = Color.White,
 )
 
-private val DarkColors = darkColorScheme(
+/**
+ * 深色主题的配色表。
+ *
+ * `internal` 而不是 `private`：`DarkThemeToneTest` 要断言**这里真正生效的那组值**。
+ * 早先 `GlassMaterialTest` 吃过一次亏 —— 测试自己复制一份数值，改主题不会变红。
+ *
+ * 2026-10-25「暗夜模式可以再暗点」：表面层按**线性亮度 ×0.75** 压一档，
+ * `NightRaised 201A11 → 1B150D`（L\* 9.7 → 7.2）、`surfaceVariant 2A2217 → 241D13`
+ * （L\* 13.8 → 11.3）、`primaryContainer 4A3714 → 402F10`（L\* 24.4 → 20.7）。
+ * `background` 用的是 `Night`（×0.78，见 `Color.kt`）。系数比背景小一点是因为面板面积大、
+ * 且压在比背景亮的区间上 —— 同系数压完它仍然比背景亮 4 级，层级不会塌。
+ *
+ * 文字不跟着压：`Moonlight` 对 surface 的对比度因此从 15:1 升到 16:1，是这轮唯一"变好"的读数。
+ */
+internal val DarkColors = darkColorScheme(
     primary = AmberBright,
     onPrimary = Color(0xFF2E2410),
-    primaryContainer = Color(0xFF4A3714),
+    primaryContainer = Color(0xFF402F10),
     onPrimaryContainer = Moonlight,
     secondary = Amber,
     onSecondary = Moonlight,
@@ -41,7 +55,7 @@ private val DarkColors = darkColorScheme(
     onBackground = Moonlight,
     surface = NightRaised,
     onSurface = Moonlight,
-    surfaceVariant = Color(0xFF2A2217),
+    surfaceVariant = Color(0xFF241D13),
     onSurfaceVariant = NightMuted,
     outline = Color(0x3DFFFFFF),
     outlineVariant = Color(0x1FFFFFFF),

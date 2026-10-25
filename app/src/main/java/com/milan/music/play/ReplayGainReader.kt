@@ -48,12 +48,29 @@ internal class ReplayGainReader(context: Context) {
      */
     private val cache = ConcurrentHashMap<Long, Float>()
 
-    /** The correction in dB for [track], or null when the file carries no usable tag. */
-    suspend fun gainFor(track: Track): Float? = withContext(Dispatchers.IO) {
-        cache[track.id]?.let { return@withContext if (it.isNaN()) null else it }
-        val gain = readGain(track)
-        cache[track.id] = gain ?: Float.NaN
-        gain
+    /**
+     * The correction in dB for [track], or null when the file carries no usable tag.
+     *
+     * The cache is consulted before switching dispatchers. A replay of a track that was
+     * already measured — skipping back, or the same track twice in a queue — would
+     * otherwise pay two dispatches for one hash lookup, on the main thread, at the exact
+     * moment a transition is already doing file work.
+     *
+     * The second lookup narrows the window rather than closing it: two rapid skips can
+     * both miss the first check and then read the same file concurrently. Closing it
+     * would take a per-id lock around a read that costs a few milliseconds — more state
+     * than the case is worth, and the second reader's result is identical anyway.
+     */
+    suspend fun gainFor(track: Track): Float? {
+        cache[track.id]?.let { cached -> return if (cached.isNaN()) null else cached }
+        return withContext(Dispatchers.IO) {
+            cache[track.id]?.let { cached ->
+                return@withContext if (cached.isNaN()) null else cached
+            }
+            val gain = readGain(track)
+            cache[track.id] = gain ?: Float.NaN
+            gain
+        }
     }
 
     private fun readGain(track: Track): Float? {

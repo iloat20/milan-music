@@ -119,6 +119,17 @@ class PlaybackService : MediaLibraryService() {
     private var replayGainReader: ReplayGainReader? = null
 
     /**
+     * Identifies the transition that owns the gain ramp.
+     *
+     * Bumped on every [Player.Listener.onMediaItemTransition], not when the replacement
+     * gain is known: a ramp already in flight must stop as soon as the track changes,
+     * including when the new track cannot be resolved at all and nothing else would
+     * invalidate it. A late ramp that kept writing would leave the new track at the old
+     * track's level until the next skip.
+     */
+    private var replayGainGeneration = 0
+
+    /**
      * Queue metadata, resolved on demand instead of shipped with every item.
      *
      * [PlayerController.playQueue] hands the session bare `mediaId` + `uri` items.
@@ -802,7 +813,9 @@ class PlaybackService : MediaLibraryService() {
                     persistQueue(player, scope)
                     persistPosition(player)
                 }
-                serviceScope.launch { applyReplayGain(player) }
+                // A ramp for the previous track must not keep writing.
+                val gainGeneration = ++replayGainGeneration
+                serviceScope.launch { applyReplayGain(player, gainGeneration) }
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -883,28 +896,61 @@ class PlaybackService : MediaLibraryService() {
      * sticky across `setMediaItems`, so leaving the previous track's correction in
      * place would keep a quiet track quiet for the whole album.
      *
-     * The re-check after the read is load-bearing. Reading a tag takes a file open on
-     * the IO dispatcher, and the user can skip again inside that window; without the
-     * check the late value would scale whichever track is playing by then.
+     * The generation check after the read is load-bearing. Reading a tag takes a file
+     * open on the IO dispatcher, and the user can skip again inside that window. It
+     * compares generations rather than media ids because skipping A -> B -> A would let
+     * the first A's value through an id comparison.
      */
-    private suspend fun applyReplayGain(player: Player) {
+    private suspend fun applyReplayGain(player: Player, generation: Int) {
         val reader = replayGainReader ?: return
         val mediaId = player.currentMediaItem?.mediaId ?: return
-        val track = trackIndex?.get(mediaId) ?: libraryTree?.cachedTrack(mediaId) ?: return
-        val startedAt = SystemClock.elapsedRealtime()
-        val gain = reader.gainFor(track)
-        if (player.currentMediaItem?.mediaId != mediaId) return
-        val readMs = SystemClock.elapsedRealtime() - startedAt
-        if (gain == null) {
-            player.volume = 1f
-            Log.i(TAG, "replaygain id=$mediaId untagged readMs=$readMs")
+        val track = trackIndex?.get(mediaId) ?: libraryTree?.cachedTrack(mediaId)
+        if (track == null) {
+            // No correction to apply for this item, but the previous track's ramp
+            // stopped part-way when the generation moved on. Sliding to unity keeps the
+            // recovery consistent with the normal path: setting it in one write would
+            // jump the level in the middle of whatever is already audible.
+            if (generation == replayGainGeneration) rampVolumeTo(player, 1f, generation)
             return
         }
-        val volume = gainToVolume(gain)
-        player.volume = volume
-        // Volume is logged in thousandths: a float printout varies in length and the
-        // only thing worth comparing between runs is the third decimal.
-        Log.i(TAG, "replaygain id=$mediaId gain=${gain}dB volume=${(volume * 1000).toInt()} readMs=$readMs")
+        // Skipping the read when the transition is already stale: `gainFor` opens the
+        // file, and a skip inside this window would otherwise pay for a tag that can no
+        // longer be applied.
+        if (generation != replayGainGeneration) return
+        val startedAt = SystemClock.elapsedRealtime()
+        val gain = reader.gainFor(track)
+        if (generation != replayGainGeneration) return
+        val readMs = SystemClock.elapsedRealtime() - startedAt
+        val target = if (gain == null) 1f else gainToVolume(gain)
+        if (gain == null) {
+            Log.i(TAG, "replaygain id=$mediaId untagged readMs=$readMs")
+        } else {
+            // Volume is logged in thousandths: a float printout varies in length and the
+            // only thing worth comparing between runs is the third decimal.
+            Log.i(TAG, "replaygain id=$mediaId gain=${gain}dB volume=${(target * 1000).toInt()} readMs=$readMs")
+        }
+        rampVolumeTo(player, target, generation)
+    }
+
+    /**
+     * Slides the player gain to [target] over [VOLUME_RAMP_MS] instead of setting it.
+     *
+     * Setting it once is a step, and across a gapless boundary that step lands in the
+     * middle of continuous audio. The sequence comes from [volumeRamp], which also
+     * collapses to a single value when the difference is inaudible — in that case this
+     * does no waiting at all, which is the common case for an untagged track following
+     * another untagged track.
+     *
+     * Stopping mid-ramp is safe: the transition that bumped [replayGainGeneration] also
+     * launched a replacement, which starts from whatever level the last write left.
+     */
+    private suspend fun rampVolumeTo(player: Player, target: Float, generation: Int) {
+        val steps = volumeRamp(player.volume, target)
+        steps.forEachIndexed { index, volume ->
+            if (generation != replayGainGeneration) return
+            player.volume = volume
+            if (index != steps.lastIndex) delay(VOLUME_RAMP_STEP_MS)
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
