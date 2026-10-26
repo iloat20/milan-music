@@ -2,9 +2,6 @@ package com.milan.music.ui.player
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -48,12 +45,10 @@ import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.model.Track
 import com.milan.music.play.PlayerController
 import com.milan.music.ui.components.CoverArt
+import com.milan.music.ui.theme.MilanMotion
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-
-/** How long a committed page takes to slide out from under the finger. */
-private const val SWITCH_SLIDE_MS = 240
 
 /** How long a committed swipe waits for the session to confirm the new track. */
 private const val SWITCH_TIMEOUT_MS = 600L
@@ -353,10 +348,14 @@ internal fun CoverCarousel(
                     scope.launch {
                         // One pitch: the outgoing card leaves the window completely and the
                         // incoming one is already sitting where it stopped.
+                        //
+                        // 时长而非弹簧，是刻意的例外：这段位移必须**正好**停在一个 pitch 上，
+                        // 弹簧过冲会越过行边缘，露出没有封面的空白带。位移由手势给定，不是
+                        // 物理量，Effects 层的时长在这里比 Spatial 层的弹簧更诚实。
                         val target = if (toNext) -pitchPx else pitchPx
                         offsetX.animateTo(
                             target,
-                            tween(SWITCH_SLIDE_MS, easing = FastOutSlowInEasing),
+                            tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
                         )
 
                         // The transport's previous() restarts the current song when it has
@@ -387,7 +386,7 @@ internal fun CoverCarousel(
                             // rather than showing a track that is not playing.
                             offsetX.animateTo(
                                 0f,
-                                spring(stiffness = Spring.StiffnessMediumLow),
+                                MilanMotion.Settle,
                             )
                         }
                         isAnimating.value = false
@@ -441,7 +440,7 @@ internal fun CoverCarousel(
                                 else -> scope.launch {
                                     offsetX.animateTo(
                                         0f,
-                                        spring(stiffness = Spring.StiffnessMediumLow),
+                                        MilanMotion.Settle,
                                     )
                                 }
                             }
@@ -451,7 +450,7 @@ internal fun CoverCarousel(
                                 scope.launch {
                                     offsetX.animateTo(
                                         0f,
-                                        spring(stiffness = Spring.StiffnessMediumLow),
+                                        MilanMotion.Settle,
                                     )
                                 }
                             }

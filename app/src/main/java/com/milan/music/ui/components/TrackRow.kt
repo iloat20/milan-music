@@ -1,7 +1,6 @@
 package com.milan.music.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -138,8 +137,8 @@ fun PlayingBars(
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
                     animation = tween(
-                        durationMillis = 380 + index * 110,
-                        easing = FastOutSlowInEasing,
+                        durationMillis = MilanMotion.BarsBaseMs + index * MilanMotion.BarsStepMs,
+                        easing = MilanMotion.Standard,
                     ),
                     repeatMode = RepeatMode.Reverse,
                 ),

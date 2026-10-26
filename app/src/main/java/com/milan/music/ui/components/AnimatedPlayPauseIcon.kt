@@ -1,8 +1,6 @@
 package com.milan.music.ui.components
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -41,16 +39,15 @@ fun AnimatedPlayPauseIcon(
         targetState = isPlaying,
         modifier = modifier,
         transitionSpec = {
+            // 缩放是 Spatial 层，进出都用弹簧：进场用 Icon（0.6 的过冲，"弹一下"），
+            // 出场用 Settle（不许过冲，旧图标只负责让位，不该再长回去）。
             val enter = scaleIn(
                 initialScale = 0.55f,
-                animationSpec = spring(
-                    dampingRatio = 0.6f,
-                    stiffness = Spring.StiffnessMedium,
-                ),
+                animationSpec = MilanMotion.Icon,
             ) + fadeIn(tween(MilanMotion.FastMs))
             val exit = scaleOut(
                 targetScale = 0.65f,
-                animationSpec = tween(MilanMotion.FastMs),
+                animationSpec = MilanMotion.Settle,
             ) + fadeOut(tween(MilanMotion.FastMs / 2))
             enter togetherWith exit
         },

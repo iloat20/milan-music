@@ -38,6 +38,23 @@ object MilanMotion {
     const val SlowMs = 420
     const val AmbientMs = 650
 
+    /**
+     * 进度条形变：条高在"细线"与"粗条"之间切换。
+     *
+     * **刻意留在 Effects 层**：时间轴的视觉反馈一旦弹簧化，条会看起来在"追"手指 ——
+     * 手指已经到位，条还在往目标滑，读起来就是播放位置滞后。
+     */
+    const val ProgressMs = 160
+
+    /**
+     * "正在播放"的三条柱：基础周期，以及逐条叠加的相位差。
+     *
+     * 三条同相位会读成一根在呼吸的条，错开 110ms 才像频谱。这是无限循环，不属于交接，
+     * 所以只给时长。
+     */
+    const val BarsBaseMs = 380
+    const val BarsStepMs = 110
+
     val Standard: Easing = FastOutSlowInEasing
 
     // ---------------------------------------------------------------- Spatial 层
@@ -86,6 +103,33 @@ object MilanMotion {
     const val ExitDampingRatio = 0.95f
     const val ExitStiffness = 480f
 
+    /**
+     * 回位：把被拖走或放错的东西送回静止位置。
+     *
+     * 阻尼 1.0 —— 这一档**不许过冲**，而且理由不是审美。过冲在这里露出的是本不该出现的
+     * 内容：封面行冲过 0 会露出相邻页，列表项冲过目标会和上下行重叠一帧，旧图标缩过头
+     * 会先变小再长回去。
+     */
+    const val SettleDampingRatio = 1f
+    const val SettleStiffness = Spring.StiffnessMediumLow
+
+    /**
+     * 图标交接：播放/暂停那一次明显的"弹出来"。
+     *
+     * 0.6 是关键阻尼比，属于刻意的大过冲。它只在图标上成立 —— 行程是图标自身的 45%，
+     * 面积小，读起来是"弹"；同一组参数用在文字或面板上就是廉价感。
+     */
+    const val IconDampingRatio = 0.6f
+    const val IconStiffness = Spring.StiffnessMedium
+
+    /**
+     * 收藏：比 [IconDampingRatio] 更软的一次弹出。
+     *
+     * 收藏是一次持久状态变更，动作可以比播放/暂停更夸张 —— 它不像播放键那样会被连点。
+     */
+    const val PopDampingRatio = 0.45f
+    const val PopStiffness = Spring.StiffnessMediumLow
+
     val Press: SpringSpec<Float> = spring(PressDampingRatio, PressStiffness)
 
     val Swap: SpringSpec<Float> = spring(SwapDampingRatio, SwapStiffness)
@@ -96,6 +140,12 @@ object MilanMotion {
 
     val Exit: SpringSpec<Float> = spring(ExitDampingRatio, ExitStiffness)
 
+    val Settle: SpringSpec<Float> = spring(SettleDampingRatio, SettleStiffness)
+
+    val Icon: SpringSpec<Float> = spring(IconDampingRatio, IconStiffness)
+
+    val Pop: SpringSpec<Float> = spring(PopDampingRatio, PopStiffness)
+
     /**
      * 位移用的整型版本。
      *
@@ -105,6 +155,16 @@ object MilanMotion {
      */
     private val SwapOffset: FiniteAnimationSpec<IntOffset> =
         spring(SwapDampingRatio, SwapStiffness)
+
+    /**
+     * 回位用的整型版本。
+     *
+     * `animateItem` 的 `placementSpec` 要的是 `FiniteAnimationSpec<IntOffset>`，吃不下
+     * [SpringSpec]<Float>。与 [SwapOffset] 同理，用同一组常量再声明一份，保证列表落位
+     * 与封面回位是**同一根**弹簧。
+     */
+    val SettleOffset: FiniteAnimationSpec<IntOffset> =
+        spring(SettleDampingRatio, SettleStiffness)
 
     // ---------------------------------------------------------------- 组合动作
 

@@ -1,7 +1,5 @@
 package com.milan.music.ui.library
 
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
@@ -77,10 +75,11 @@ fun SongsList(
                 onClick = { onPlay(tracks, index) },
                 onToggleFavorite = { onToggleFavorite(track.id) },
                 // 搜索过滤或增删歌曲时，落位用弹簧、出现/消失用短淡入淡出。
+                // 落位走 Settle（不许过冲）：冲过目标会和相邻行重叠一帧。
                 // 只对可见项生效，长列表没有额外成本。
                 modifier = Modifier.animateItem(
                     fadeInSpec = tween(MilanMotion.MediumMs),
-                    placementSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                    placementSpec = MilanMotion.SettleOffset,
                     fadeOutSpec = tween(MilanMotion.FastMs),
                 ),
             )

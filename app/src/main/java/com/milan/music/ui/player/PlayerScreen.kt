@@ -816,7 +816,7 @@ private fun AppleMusicProgress(
 
     val barHeight by animateDpAsState(
         targetValue = if (dragging) 6.dp else 3.dp,
-        animationSpec = tween(160),
+        animationSpec = tween(MilanMotion.ProgressMs),
         label = "progress-bar-height",
     )
     // 圆点常驻，拖动时只放大一点。以前是"拖动才出现"，停下就看不到播到哪儿了，

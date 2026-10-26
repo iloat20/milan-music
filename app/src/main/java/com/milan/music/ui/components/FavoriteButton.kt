@@ -1,8 +1,6 @@
 package com.milan.music.ui.components
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -64,18 +62,16 @@ fun FavoriteButton(
         AnimatedContent(
             targetState = isFavorite,
             transitionSpec = {
-                // 0.45 的阻尼比这一段是收藏专属：要有一次明确的"弹出来"，而不是
-                // MilanMotion.Press 那种克制的按压反馈。
+                // enter 走 Pop（0.45 的阻尼比）—— 这一段是收藏专属：要有一次明确的
+                // "弹出来"，而不是 MilanMotion.Press 那种克制的按压反馈。
+                // exit 走 Settle：旧图标只负责让位，过冲会让它先缩过头再长回来。
                 val enter = scaleIn(
                     initialScale = 0.55f,
-                    animationSpec = spring(
-                        dampingRatio = 0.45f,
-                        stiffness = Spring.StiffnessMediumLow,
-                    ),
+                    animationSpec = MilanMotion.Pop,
                 ) + fadeIn(tween(MilanMotion.FastMs))
                 val exit = scaleOut(
                     targetScale = 0.7f,
-                    animationSpec = tween(MilanMotion.FastMs),
+                    animationSpec = MilanMotion.Settle,
                 ) + fadeOut(tween(MilanMotion.FastMs / 2))
                 enter togetherWith exit
             },

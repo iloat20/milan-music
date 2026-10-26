@@ -110,7 +110,7 @@ fun CoverArt(
         Crossfade(
             targetState = image,
             modifier = Modifier.fillMaxSize(),
-            animationSpec = tween(220, easing = MilanMotion.Standard),
+            animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
             label = "cover-art",
         ) { shown ->
             if (shown != null) {
