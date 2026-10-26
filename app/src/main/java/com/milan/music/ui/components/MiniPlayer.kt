@@ -73,6 +73,8 @@ fun MiniPlayer(
                 onClick = onClick,
             ),
         shape = RoundedCornerShape(26.dp),
+        // 队列到达时这张卡片是"出现"，扫一次高光；重排与换曲都不重放。
+        sweepOnAppear = true,
     ) {
         Row(
             modifier = Modifier

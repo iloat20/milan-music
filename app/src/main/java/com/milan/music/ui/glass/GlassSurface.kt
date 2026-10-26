@@ -41,6 +41,10 @@ import dev.chrisbanes.haze.glass.hazeGlass
  * 关于 `blurRadius`：这个参数被**删掉**了。两种内置样式都自带按尺寸校准的模糊，
  * 外部再塞一个固定 dp 等于关掉那套校准。要调就用 `optics { copy(...) }`。
  *
+ * 第 73 批加了 [sweepOnAppear]：面板"出现"时扫一次高光。只给会出现的那两块（迷你
+ * 播放器、排序面板）—— 常驻面板不要开，三块玻璃在启动时同时扫一次看起来就是一次故障。
+ * 扫光是纯叠加绘制，不读 HazeState、不改采样坐标，详见 `GlassSweep`。
+ *
  * Note: a `hazeGlass` node may not draw an ancestor `hazeSource`. Callers must
  * therefore place glass surfaces as siblings of the source, not inside it.
  */
@@ -50,6 +54,7 @@ fun GlassSurface(
     hazeState: HazeState,
     modifier: Modifier = Modifier,
     shape: RoundedCornerShape = RoundedCornerShape(28.dp),
+    sweepOnAppear: Boolean = false,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val glass = LocalGlassColors.current
@@ -72,6 +77,8 @@ fun GlassSurface(
             // 子内容（封面、图标）自己也需要裁剪：haze-glass 的 shape 只保证材质边界，
             // 不会约束里面画什么。
             .clip(shape)
+            // 扫光必须在 clip 之后：它靠形状裁剪收掉旋转后溢出的矩形。
+            .glassSweepOnAppear(sweepOnAppear, glass.isDark)
             .hazeGlass(
                 input = HazeInput.Backdrop(hazeState),
                 style = style,

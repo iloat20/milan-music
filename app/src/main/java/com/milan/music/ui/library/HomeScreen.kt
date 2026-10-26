@@ -643,6 +643,8 @@ private fun SortMenuOverlay(
                 .padding(top = 64.dp, end = 14.dp)
                 .width(156.dp),
             shape = RoundedCornerShape(20.dp),
+            // 每弹一次都是一次出现，所以每次都扫。
+            sweepOnAppear = true,
         ) {
             Column(Modifier.padding(vertical = 6.dp)) {
                 SortMode.entries.forEach { mode ->
