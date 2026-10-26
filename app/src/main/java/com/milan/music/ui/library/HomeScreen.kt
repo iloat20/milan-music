@@ -69,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -76,6 +77,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -85,6 +87,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -120,6 +123,14 @@ private val ContentBottomPadding = 152.dp
  */
 private val SearchFieldOverlayHeight = 66.dp
 
+/**
+ * 播放页下滑时首页联动圆角的目标值，按进度线性长到它。
+ *
+ * 这里**没有**缩放系数：首页一旦被几何变换，玻璃面板的采样就会错位（原因见下方
+ * `graphicsLayer` 处的注释）。想恢复"卡片退后"的缩小感，得先解决玻璃采样。
+ */
+private val CoverCornerRadius = 28.dp
+
 @Composable
 fun HomeScreen(
     container: AppContainer,
@@ -132,6 +143,18 @@ fun HomeScreen(
     isCovered: Boolean = false,
     /** Monotonic id of an explicit "play" request from the home-screen widget. */
     playRequest: Long = 0L,
+    /**
+     * 迷你播放器卡片在窗口坐标系里的矩形，供播放页的入场动画当生长起点。
+     */
+    onMiniPlayerBounds: (Rect) -> Unit = {},
+    /**
+     * 播放页被向下拖动的进度（0 = 完全盖住，1 = 完全退出）。
+     *
+     * 故意做成 lambda 而不是 `Float` 参数：这个值每帧都变，参数化会让整页重组
+     * （包括几万条曲目列表）。lambda 只在 `graphicsLayer` 的绘制阶段被读取，
+     * 于是每帧只标脏一个图层。
+     */
+    coverProgress: () -> Float = { 0f },
 ) {
     val context = LocalContext.current
     val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(container))
@@ -149,7 +172,16 @@ fun HomeScreen(
     // Set when the system stops showing the permission dialog (second denial on
     // Android 11+, or "don't ask again"). Requesting again then does nothing at
     // all, so the gate has to point the user at the system settings instead.
-    var permanentlyDenied by remember { mutableStateOf(false) }
+    // Persisted because the denial survives the process: without it the first
+    // request after a restart silently does nothing and the gate looks broken.
+    val permissionPrefs = remember(context) {
+        context.getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+    }
+    var permanentlyDenied by remember {
+        mutableStateOf(
+            permissionPrefs.getBoolean(KEY_AUDIO_PERMANENTLY_DENIED, false),
+        )
+    }
     val activity = remember(context) { context.findActivity() }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -158,11 +190,20 @@ fun HomeScreen(
         hasAudioPermission = granted
         if (granted) {
             permanentlyDenied = false
+            permissionPrefs.edit { remove(KEY_AUDIO_PERMANENTLY_DENIED) }
             viewModel.refresh()
         } else {
-            permanentlyDenied = activity?.let {
+            val denied = activity?.let {
                 !ActivityCompat.shouldShowRequestPermissionRationale(it, audioPermissionName())
             } ?: false
+            permanentlyDenied = denied
+            permissionPrefs.edit {
+                if (denied) {
+                    putBoolean(KEY_AUDIO_PERMANENTLY_DENIED, true)
+                } else {
+                    remove(KEY_AUDIO_PERMANENTLY_DENIED)
+                }
+            }
         }
     }
 
@@ -175,6 +216,7 @@ fun HomeScreen(
         if (granted && !hasAudioPermission) {
             hasAudioPermission = true
             permanentlyDenied = false
+            permissionPrefs.edit { remove(KEY_AUDIO_PERMANENTLY_DENIED) }
             viewModel.refresh()
         }
     }
@@ -288,7 +330,29 @@ fun HomeScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // 播放页下滑时首页的联动圆角。换算成 px 是因为下面的 `graphicsLayer` lambda
+    // 不是组合作用域，拿不到 dp 转换。
+    val coverCornerPx = with(LocalDensity.current) { CoverCornerRadius.toPx() }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                // 播放页压下来时，首页作为"下面那张卡片"起圆角 —— iOS sheet 的既有语义。
+                //
+                // **只做圆角，不做缩放**（第 71 批真机回归）。haze 的采样坐标按窗口算，
+                // 而源的 RenderNode 内容不跟着祖先的几何变换走：这里一加 scale，底栏与
+                // 迷你播放器的玻璃面板里就会浮出**放大且错位**的列表文字（实测现象）。
+                // 圆角只是绘制期裁剪，不参与坐标换算，所以安全。
+                //
+                // 缩放要恢复的话，必须同时把玻璃切到非采样模式（`GlassSurface.liveBackdrop`），
+                // 代价是下滑瞬间材质跳变 —— 那是产品决策，不是参数问题。
+                val p = coverProgress()
+                if (p <= 0f) return@graphicsLayer
+                shape = RoundedCornerShape(coverCornerPx * p)
+                clip = true
+            },
+    ) {
         AmbientBackdrop(
             modifier = Modifier
                 .fillMaxSize()
@@ -375,6 +439,7 @@ fun HomeScreen(
                         onClick = onOpenPlayer,
                         onTogglePlay = container.player::togglePlayPause,
                         onNext = container.player::next,
+                        onBoundsChange = onMiniPlayerBounds,
                     )
                     Spacer(Modifier.height(10.dp))
                 }
@@ -819,3 +884,6 @@ private fun audioPermissionName(): String =
     } else {
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
+
+private const val PERMISSION_PREFS = "milan_permission_state"
+private const val KEY_AUDIO_PERMANENTLY_DENIED = "audio_permanently_denied"

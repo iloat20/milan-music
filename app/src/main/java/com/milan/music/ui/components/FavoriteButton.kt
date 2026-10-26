@@ -55,6 +55,8 @@ fun FavoriteButton(
             .size(48.dp)
             .noRippleClickable(
                 role = Role.Button,
+                // 收藏会改一次持久状态，且图标有一次明显回弹 —— 触觉与视觉同拍。
+                haptic = true,
                 onClick = onToggle,
             ),
         contentAlignment = Alignment.Center,

@@ -20,7 +20,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -45,6 +48,13 @@ fun MiniPlayer(
     onTogglePlay: () -> Unit,
     onNext: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 这张卡片在窗口坐标系里的位置与尺寸。
+     *
+     * 播放页的入场动画要用它当起点（iOS 27 的"卡片长大成整页"）：没有这个矩形，
+     * 入场只能退回"从屏幕外滑入"，两种观感的差别就在这一步。
+     */
+    onBoundsChange: ((Rect) -> Unit)? = null,
 ) {
     val track = state.currentTrack ?: return
 
@@ -52,6 +62,9 @@ fun MiniPlayer(
         hazeState = hazeState,
         modifier = modifier
             .fillMaxWidth()
+            .onGloballyPositioned { coordinates ->
+                onBoundsChange?.invoke(coordinates.boundsInWindow())
+            }
             // 整张卡片是一个点击目标；内层播放/下一首按钮会先消费点击。
             // 玻璃面板上不加涟漪，改用轻微缩放作为按压反馈。
             .noRippleClickable(
@@ -116,6 +129,8 @@ fun MiniPlayer(
                         .noRippleClickable(
                             role = Role.Button,
                             pressScale = 0.86f,
+                            // 播放/暂停是"状态真的翻了"的动作，给一次轻触觉。
+                            haptic = true,
                             onClick = onTogglePlay,
                         ),
                     contentAlignment = Alignment.Center,

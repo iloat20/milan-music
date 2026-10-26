@@ -11,6 +11,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import com.milan.music.ui.theme.MilanMotion
 
@@ -19,6 +21,10 @@ import com.milan.music.ui.theme.MilanMotion
  * 用于玻璃面板上的导航项与播放控制按钮，避免按压时出现整块背景色变化。
  *
  * [pressScale] 不为空时同时提供缩放反馈：按下缩小，松手回弹。
+ *
+ * [haptic] 为 true 时在点击生效前给一次**轻**触觉（`TextHandleMove`，即系统里最轻的那一档）。
+ * 只有"状态真的翻转了"的按钮才该开：播放/暂停、收藏。刻意**不做**音频同步触觉 ——
+ * 那是 Android 17 的能力，但它和"安静听歌"的产品意图相反。
  */
 @Composable
 fun Modifier.noRippleClickable(
@@ -26,16 +32,23 @@ fun Modifier.noRippleClickable(
     role: Role? = null,
     onClickLabel: String? = null,
     pressScale: Float? = null,
+    haptic: Boolean = false,
     onClick: () -> Unit,
 ): Modifier {
     val interactionSource = remember { MutableInteractionSource() }
+    val hapticFeedback = LocalHapticFeedback.current
     val clickable = clickable(
         interactionSource = interactionSource,
         indication = null,
         enabled = enabled,
         role = role,
         onClickLabel = onClickLabel,
-        onClick = onClick,
+        onClick = {
+            if (haptic) {
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+            onClick()
+        },
     )
     return if (pressScale == null) {
         clickable
@@ -55,9 +68,11 @@ fun Modifier.noRippleCombinedClickable(
     onLongClickLabel: String? = null,
     onLongClick: (() -> Unit)? = null,
     pressScale: Float? = null,
+    haptic: Boolean = false,
     onClick: () -> Unit,
 ): Modifier {
     val interactionSource = remember { MutableInteractionSource() }
+    val hapticFeedback = LocalHapticFeedback.current
     val clickable = combinedClickable(
         interactionSource = interactionSource,
         indication = null,
@@ -66,7 +81,12 @@ fun Modifier.noRippleCombinedClickable(
         onClickLabel = onClickLabel,
         onLongClickLabel = onLongClickLabel,
         onLongClick = onLongClick,
-        onClick = onClick,
+        onClick = {
+            if (haptic) {
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+            onClick()
+        },
     )
     return if (pressScale == null) {
         clickable

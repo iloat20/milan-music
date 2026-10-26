@@ -5,11 +5,8 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -45,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -52,6 +50,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -59,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -172,6 +172,20 @@ internal fun PlayerScreen(
     player: PlayerController,
     artwork: ArtworkRepository,
     onBack: () -> Unit,
+    /**
+     * 迷你播放器卡片的窗口矩形 —— 入场动画的生长起点。
+     *
+     * `null` 表示这一帧没有可用起点（队列未就绪、卡片正在退场）。此时进场退回
+     * 纯淡入，**不阻断**页面挂载：动画拿不到起点是常态，不能变成"打不开播放页"。
+     */
+    origin: Rect? = null,
+    /**
+     * 拖动进度（0 = 完全盖住首页 / 1 = 完全退出）。
+     *
+     * 首页拿它做联动缩放与圆角。每帧都会回调，所以接收端只许写进
+     * `graphicsLayer` 能读到的 state，不许进组合参数。
+     */
+    onDragProgress: (Float) -> Unit = {},
 ) {
     val playerState by viewModel.playback.collectAsStateWithLifecycle()
     val isFavorite by viewModel.isFavorite.collectAsStateWithLifecycle()
@@ -245,6 +259,21 @@ internal fun PlayerScreen(
         }
     }
 
+    // ---- 入场：从迷你播放器卡片的位置长到全屏（iOS 27 的 sheet 展开语义）----
+    //
+    // 0 = 尚未出现，1 = 完全就位。起点矩形可用时交给弹簧，让"落位"有物理收势；
+    // 起点为空时直接 1 —— 宁可没有动画，也不能让页面停在 alpha 0 上。
+    //
+    // 这是**生长**而不是"从屏幕外平移"：整页以迷你播放器所在的纵向位置为重心
+    // （transformOrigin 从 0.88 收到 0.5），从 0.94 放大到 1。外观差别是
+    // "卡片变大" vs "一页从底下推上来"，前者不需要用户在屏幕边上等它走完。
+    val grow = remember { Animatable(if (origin == null) 1f else 0f) }
+    LaunchedEffect(Unit) {
+        if (grow.value < 1f) {
+            grow.animateTo(1f, MilanMotion.Grow)
+        }
+    }
+
     // Interactive swipe-down: the sheet follows the finger while the home screen
     // shows through underneath. Past the threshold it animates the rest of the way
     // off-screen before popping; below it springs back.
@@ -254,6 +283,15 @@ internal fun PlayerScreen(
     // Measured height of the sheet, published by BoxWithConstraints below. Needed
     // because the dismissal can start from outside that scope (system back).
     val sheetHeightPx = remember { mutableFloatStateOf(0f) }
+
+    // 首页的联动缩放读的是这个回调写出来的值。用 snapshotFlow 而不是在 DragGesture
+    // 里直接回调：拖动、回弹、预测式返回、系统返回键四条路径都会改 offsetY，
+    // 只有在这里收口才不会漏掉某一条（漏掉的表现是"首页卡在缩小状态上"）。
+    LaunchedEffect(Unit) {
+        snapshotFlow { offsetY.value to sheetHeightPx.floatValue }.collect { (y, h) ->
+            onDragProgress(if (h > 0f) (y / h).coerceIn(0f, 1f) else 0f)
+        }
+    }
 
     // Single dismissal path for the swipe gesture and the system back key: the sheet
     // slides fully off-screen and only then is the overlay removed.
@@ -268,7 +306,7 @@ internal fun PlayerScreen(
                 // overlay is simply removed rather than animating to zero.
                 val target = sheetHeightPx.floatValue
                 if (target > 0f) {
-                    offsetY.animateTo(target, tween(240, easing = FastOutSlowInEasing))
+                    offsetY.animateTo(target, MilanMotion.Exit)
                 }
                 onBack()
             }
@@ -279,16 +317,30 @@ internal fun PlayerScreen(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer {
-                val progress = if (size.height > 0f) {
+                val dragProgress = if (size.height > 0f) {
                     (offsetY.value / size.height).coerceIn(0f, 1f)
                 } else {
                     0f
                 }
-                translationY = offsetY.value
-                alpha = 1f - 0.25f * progress
-                val shrink = 1f - 0.06f * progress
-                scaleX = shrink
-                scaleY = shrink
+                val p = grow.value
+                // 生长：前 55% 就把不透明度拉满，剩下的行程只留给弹簧收势 ——
+                // 观感是"先出现、再落位"，而不是"一边淡入一边滑进来"。
+                val appear = (p / 0.55f).coerceIn(0f, 1f)
+                // 生长阶段额外给一点上移：只有缩放会像"原地胀大"，配上 6% 屏高的位移
+                // 才有"从卡片那里升上来"的方向感。p = 1 时这一项归零。
+                translationY = offsetY.value + (1f - p) * size.height * 0.06f
+                alpha = appear * (1f - 0.25f * dragProgress)
+                // 从 0.94 长到 1；重心压在迷你播放器卡片的纵向位置上，随生长收到正中。
+                // 收到 0.5 之后，下滑时的手感仍是原来的"以中心缩小"。
+                val growScale = 0.94f + 0.06f * p
+                val dragShrink = 1f - 0.06f * dragProgress
+                scaleX = growScale * dragShrink
+                scaleY = growScale * dragShrink
+                val anchor = origin
+                    ?.takeIf { size.height > 0f }
+                    ?.let { (it.center.y / size.height).coerceIn(0.3f, 0.98f) }
+                    ?: 0.88f
+                transformOrigin = TransformOrigin(0.5f, anchor * (1f - p) + 0.5f * p)
             }
             // Must sit INSIDE graphicsLayer: painted before it, the backdrop would
             // stay put while the sheet slides away, hiding the home screen.
@@ -312,7 +364,7 @@ internal fun PlayerScreen(
                             scope.launch {
                                 offsetY.animateTo(
                                     0f,
-                                    spring(stiffness = Spring.StiffnessMediumLow),
+                                    MilanMotion.Sheet,
                                 )
                             }
                         }
@@ -322,7 +374,7 @@ internal fun PlayerScreen(
                             scope.launch {
                                 offsetY.animateTo(
                                     0f,
-                                    spring(stiffness = Spring.StiffnessMediumLow),
+                                    MilanMotion.Sheet,
                                 )
                             }
                         }
@@ -365,7 +417,7 @@ internal fun PlayerScreen(
                 }
             } catch (cancellation: CancellationException) {
                 // The gesture was released before committing: put the sheet back.
-                offsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                offsetY.animateTo(0f, MilanMotion.Sheet)
                 throw cancellation
             }
             dismissToHome()
@@ -928,6 +980,9 @@ private fun PlaybackControls(
                     .noRippleClickable(
                         role = Role.Button,
                         pressScale = 0.90f,
+                        // 播放/暂停：图标会翻转一次，触觉与那一次翻转同拍。
+                        // 切歌按钮不加 —— 连续点下一首会变成一串震动。
+                        haptic = true,
                         onClick = onTogglePlay,
                     ),
                 contentAlignment = Alignment.Center,
