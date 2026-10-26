@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
@@ -66,10 +67,12 @@ fun MiniPlayer(
                 onBoundsChange?.invoke(coordinates.boundsInWindow())
             }
             // 整张卡片是一个点击目标；内层播放/下一首按钮会先消费点击。
-            // 玻璃面板上不加涟漪，改用轻微缩放作为按压反馈。
+            // 玻璃面板上不加涟漪，改用挤压反馈：横向几乎不动、纵向压下去。
+            // 等比缩小在这张卡片上读成"卡片退后了"，非等比才读成"被按下去"。
             .noRippleClickable(
                 role = Role.Button,
-                pressScale = 0.985f,
+                pressScale = MilanMotion.PressSquashScaleX,
+                pressScaleY = MilanMotion.PressSquashScaleY,
                 onClick = onClick,
             ),
         shape = RoundedCornerShape(26.dp),
@@ -131,8 +134,14 @@ fun MiniPlayer(
                         .noRippleClickable(
                             role = Role.Button,
                             pressScale = 0.86f,
-                            // 播放/暂停是"状态真的翻了"的动作，给一次轻触觉。
-                            haptic = true,
+                            // 播放/暂停是"状态真的翻了"的动作。触觉按翻转**方向**分档：
+                            // 开始播放是 ToggleOn，暂停是 ToggleOff —— 两者在系统触觉
+                            // 引擎里是不同的模式，用户闭着眼也能分辨现在按的是哪一个。
+                            haptic = if (state.isPlaying) {
+                                HapticFeedbackType.ToggleOff
+                            } else {
+                                HapticFeedbackType.ToggleOn
+                            },
                             onClick = onTogglePlay,
                         ),
                     contentAlignment = Alignment.Center,

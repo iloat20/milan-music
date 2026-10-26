@@ -14,7 +14,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 
 /**
  * 全应用共用的动效节奏。第 71 批改成**两层制**（Android 17 的 Expressive 口径 + iOS 27 的克制口径）：
@@ -130,6 +132,39 @@ object MilanMotion {
     const val PopDampingRatio = 0.45f
     const val PopStiffness = Spring.StiffnessMediumLow
 
+    /**
+     * 按压形变：横向几乎不动，纵向压下去。
+     *
+     * Android 17 的按压反馈是**体积近似守恒的挤压**，不是整体缩小。等比缩放在一张卡片上
+     * 读起来是"这张卡片退后了一点"，非等比才读成"被手指按下去"。
+     *
+     * 两个数的乘积 0.994 × 0.976 ≈ 0.970，与旧的等比 0.985²（≈0.970）面积相同 ——
+     * 换的是形变方向，不是按压力度。所以这不是"更用力"，只是"更像按压"。
+     *
+     * **只给矩形面板用**。圆形图标按钮（播放键、切歌、收藏）保持等比：
+     * 圆在非等比缩放下会变成椭圆，读起来是图形被拉坏，而不是被按下。
+     */
+    const val PressSquashScaleX = 0.994f
+    const val PressSquashScaleY = 0.976f
+
+    /**
+     * 系统关掉动画时，"正在播放"三条柱的静止高度（占满格的比例）。
+     *
+     * 取 0.55 是因为它落在正常呼吸区间的中段（0.30–1.0）：静态画面看起来仍像"在响"，
+     * 而不是三根齐平的短棍。
+     */
+    const val BarsRestScale = 0.55f
+
+    /**
+     * 排序面板的圆角：展开前的初值，与展开后的 [SortMenuCorner]。
+     *
+     * 差 8dp 是一次形状收敛 —— 面板从更圆的初始态压到终态，正是 M3 Expressive 的
+     * "menu 从触发点的形状长成面板"里可复现的那一半（完整形状库在 material3 1.5+，
+     * 当前 1.4.0 没有 `MaterialShapes`）。
+     */
+    val SortMenuCornerFrom: Dp = 28.dp
+    val SortMenuCorner: Dp = 20.dp
+
     val Press: SpringSpec<Float> = spring(PressDampingRatio, PressStiffness)
 
     val Swap: SpringSpec<Float> = spring(SwapDampingRatio, SwapStiffness)
@@ -165,6 +200,15 @@ object MilanMotion {
      */
     val SettleOffset: FiniteAnimationSpec<IntOffset> =
         spring(SettleDampingRatio, SettleStiffness)
+
+    /**
+     * [Sheet] 的 Dp 版本。
+     *
+     * `animateDpAsState` 要的是 `AnimationSpec<Dp>`，同样吃不下 `SpringSpec<Float>`。
+     * 排序面板的圆角收敛走这一根，保证"面板长大"和"圆角收拢"是同一次运动，而不是
+     * 两个各自为政的动画叠在一起。
+     */
+    val SheetDp: FiniteAnimationSpec<Dp> = spring(SheetDampingRatio, SheetStiffness)
 
     // ---------------------------------------------------------------- 组合动作
 

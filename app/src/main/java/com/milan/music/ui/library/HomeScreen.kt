@@ -17,6 +17,7 @@ import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
@@ -468,15 +469,19 @@ fun HomeScreen(
         // 这三者才有可比性）。
         AnimatedVisibility(
             visible = sortMenuOpen,
+            // 出现走弹簧、消失走 Exit：面板是"从右上角长出来"的，tween 会让它在
+            // 起步那一下显得迟疑；离场不需要回弹（它已经被决定要走了）。
+            // transformOrigin 始终钉在右上角，与触发按钮同侧 —— 这是"从锚点生长"
+            // 唯一能在不改坐标系的前提下做对的部分。
             enter = fadeIn(tween(MilanMotion.FastMs)) + scaleIn(
                 initialScale = 0.94f,
                 transformOrigin = TransformOrigin(1f, 0f),
-                animationSpec = tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
+                animationSpec = MilanMotion.Sheet,
             ),
             exit = fadeOut(tween(MilanMotion.FastMs)) + scaleOut(
                 targetScale = 0.96f,
                 transformOrigin = TransformOrigin(1f, 0f),
-                animationSpec = tween(MilanMotion.FastMs, easing = MilanMotion.Standard),
+                animationSpec = MilanMotion.Exit,
             ),
         ) {
             SortMenuOverlay(
@@ -624,6 +629,20 @@ private fun SortMenuOverlay(
     onSelect: (SortMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // 面板出现时圆角从 28dp 收到 20dp：正面板"从更圆的初始态压成终态"，
+    // 是 M3 Expressive 的 menu 形状收敛里当前依赖能复现的那一半
+    // （完整形状库 `MaterialShapes` 要 material3 1.5+，本工程是 1.4.0）。
+    //
+    // 这里改的是 `GraphicsLayer.shape` 的裁剪路径，**不动采样区域** —— haze 按节点
+    // bounds 取样，bounds 没变，所以不会重演第 71 批那次"玻璃里浮出放大错位文字"。
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { settled = true }
+    val corner by animateDpAsState(
+        targetValue = if (settled) MilanMotion.SortMenuCorner else MilanMotion.SortMenuCornerFrom,
+        animationSpec = MilanMotion.SheetDp,
+        label = "sort-menu-corner",
+    )
+
     Box(Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -642,7 +661,7 @@ private fun SortMenuOverlay(
                 .statusBarsPadding()
                 .padding(top = 64.dp, end = 14.dp)
                 .width(156.dp),
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(corner),
             // 每弹一次都是一次出现，所以每次都扫。
             sweepOnAppear = true,
         ) {

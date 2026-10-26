@@ -62,7 +62,9 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -195,6 +197,10 @@ internal fun PlayerScreen(
 
     val density = LocalDensity.current
     val dismissThreshold = with(density) { 110.dp.toPx() }
+    // 手指越过关闭阈值时给一次阈触觉：这一下是"你已经做过界了"的物理确认，
+    // 不是装饰。用 GestureThresholdActivate 而不是普通点击触觉 —— 它的语义正是
+    // "手势越过了一个会改变结果的界线"，系统触觉引擎会给出更短、更硬的一记。
+    val hapticFeedback = LocalHapticFeedback.current
 
     // 色场**故意**不跟曲目一起作废：新封面解码完成前沿用上一套配色，否则每次切歌都会
     // 先闪一下兜底深褐。解码完成后由色场自己的颜色动画接力过渡。
@@ -359,6 +365,9 @@ internal fun PlayerScreen(
                     onDragEnd = {
                         if (isSettling.value) return@detectVerticalDragGestures
                         if (offsetY.value > dismissThreshold) {
+                            hapticFeedback.performHapticFeedback(
+                                HapticFeedbackType.GestureThresholdActivate,
+                            )
                             dismissToHome()
                         } else {
                             scope.launch {
@@ -980,9 +989,14 @@ private fun PlaybackControls(
                     .noRippleClickable(
                         role = Role.Button,
                         pressScale = 0.90f,
-                        // 播放/暂停：图标会翻转一次，触觉与那一次翻转同拍。
+                        // 播放/暂停：图标会翻转一次，触觉与那一次翻转同拍，且按翻转方向
+                        // 分档（开始=ToggleOn，暂停=ToggleOff）。
                         // 切歌按钮不加 —— 连续点下一首会变成一串震动。
-                        haptic = true,
+                        haptic = if (isPlaying) {
+                            HapticFeedbackType.ToggleOff
+                        } else {
+                            HapticFeedbackType.ToggleOn
+                        },
                         onClick = onTogglePlay,
                     ),
                 contentAlignment = Alignment.Center,

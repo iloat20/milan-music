@@ -16,7 +16,7 @@ val keystoreProps: Provider<Properties> = providers.fileContents(
 }
 
 /** 唯一版本号来源；版本名由它派生（见 `defaultConfig`）。 */
-val appVersionCode = 73
+val appVersionCode = 74
 
 plugins {
     alias(libs.plugins.android.application)

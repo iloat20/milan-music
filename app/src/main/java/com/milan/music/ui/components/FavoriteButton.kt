@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -54,7 +55,9 @@ fun FavoriteButton(
             .noRippleClickable(
                 role = Role.Button,
                 // 收藏会改一次持久状态，且图标有一次明显回弹 —— 触觉与视觉同拍。
-                haptic = true,
+                // 用 Confirm 而不是 ToggleOn/ToggleOff：收藏与取消都是"提交了一个持久
+                // 变更"，Confirm 表达的是"生效了"。方向由图标与颜色说，不必让手也去分辨。
+                haptic = HapticFeedbackType.Confirm,
                 onClick = onToggle,
             ),
         contentAlignment = Alignment.Center,

@@ -111,6 +111,43 @@ class MilanMotionTest {
         )
     }
 
+    /**
+     * 按压形变必须"纵向压、横向几乎不动"，且面积与旧的等比缩放一致。
+     *
+     * 这一条守的是**形变方向**，不是力度。等比缩小在卡片上读成"卡片退后了"；
+     * 只有纵向比横向收得多，才读成"被手指按下去"。同时横向不许超过 1 ——
+     * 卡片横向放大 0.6% 会盖住相邻元素的边缘。
+     */
+    @Test
+    fun `press squash compresses vertically and keeps the same area`() {
+        val x = MilanMotion.PressSquashScaleX
+        val y = MilanMotion.PressSquashScaleY
+
+        assertTrue("横向 ${x} 必须小于 1：放大在卡片上会盖住邻居", x < 1f)
+        assertTrue("纵向 $y 必须比横向 ${x} 收得更多，否则读成等比缩小", y < x)
+        assertTrue("形变不能小到看不见（纵向 $y 应 ≤ 0.99）", y <= 0.99f)
+        assertTrue("形变不能大到像故障（纵向 $y 应 ≥ 0.94）", y >= 0.94f)
+
+        // 面积守恒：与旧等比 0.985² ≈ 0.970 同一档力度，换的只是方向。
+        val area = x * y
+        assertEquals("面积 ${area} 应与 0.970 一致（±0.005）", 0.970f, area, 0.005f)
+    }
+
+    /**
+     * 排序面板的圆角收敛必须是"从更圆收到终态"，且差值看得见。
+     *
+     * 差 4dp 以下在 156dp 宽的面板上分辨不出来 —— 那就不该写进动画，直接固定圆角。
+     */
+    @Test
+    fun `sort menu corner converges by a visible step`() {
+        val from = MilanMotion.SortMenuCornerFrom.value
+        val to = MilanMotion.SortMenuCorner.value
+
+        assertTrue("初始圆角 $from 必须大于终态 $to", from > to)
+        assertTrue("差值 ${from - to}dp 太小，看不出来", from - to >= 4f)
+        assertTrue("终态 $to 应落在面板圆角区间 16–24dp", to in 16f..24f)
+    }
+
     private fun assertUsable(name: String, spec: SpringSpec<Float>) {
         assertTrue(
             "$name 的阻尼 ${spec.dampingRatio} 不在 0.4f–1f：0 是永不停止的振荡，1 以上是拖延",

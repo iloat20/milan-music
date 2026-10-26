@@ -1,5 +1,7 @@
 package com.milan.music.ui.components
 
+import android.content.Context
+import android.provider.Settings
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -23,10 +25,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
@@ -119,12 +123,55 @@ fun TrackRow(
 internal fun shouldAnimatePlayingBars(isPlaying: Boolean, uiCovered: Boolean): Boolean =
     isPlaying && !uiCovered
 
+/**
+ * 系统的"移除动画"是否把时长倍率压到了 0。
+ *
+ * Compose 的**有限**动画会自动跟随这个倍率（`tween`/`spring` 都会乘它），但
+ * **无限循环不会** —— `rememberInfiniteTransition` 没有终点，倍率为 0 时它不会
+ * 自己停下。所以三条柱必须在组合期显式判断，否则用户开着"移除动画"，列表里
+ * 那三根柱仍在永远呼吸。这是无障碍缺陷，不是风格选择。
+ *
+ * 抽成纯函数是为了能断言：`barsShouldAnimate` 不碰 Android API，可以直接单测。
+ */
+internal fun barsShouldAnimate(animationScale: Float): Boolean = animationScale > 0f
+
+/**
+ * 读系统的动画时长倍率。
+ *
+ * 读不到时按 1 处理：宁可多动一帧，也不要因为一次读取失败让"正在播放"变成三根
+ * 不动的短棍 —— 那会被读成"卡住了"。
+ */
+private fun systemAnimationScale(context: Context): Float =
+    Settings.Global.getFloat(
+        context.contentResolver,
+        Settings.Global.ANIMATOR_DURATION_SCALE,
+        1f,
+    )
+
 @Composable
 fun PlayingBars(
     color: Color,
     modifier: Modifier = Modifier,
     barCount: Int = 3,
 ) {
+    val context = LocalContext.current
+    val animationScale = remember(context) { systemAnimationScale(context) }
+
+    // 早返回而不是"动画照跑、只忽略结果"：后者在倍率为 0 时仍会每帧请求一次
+    // 布局，正是"移除动画"要省掉的那部分。
+    if (!barsShouldAnimate(animationScale)) {
+        Row(
+            modifier = modifier,
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            repeat(barCount) {
+                Bar(color = color, scale = MilanMotion.BarsRestScale)
+            }
+        }
+        return
+    }
+
     val transition = rememberInfiniteTransition(label = "playing-bars")
     Row(
         modifier = modifier,
@@ -144,13 +191,18 @@ fun PlayingBars(
                 ),
                 label = "bar-$index",
             )
-            Box(
-                modifier = Modifier
-                    .width(2.5.dp)
-                    .height(13.dp * scale)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(color),
-            )
+            Bar(color = color, scale = scale)
         }
     }
+}
+
+@Composable
+private fun Bar(color: Color, scale: Float) {
+    Box(
+        modifier = Modifier
+            .width(2.5.dp)
+            .height(13.dp * scale)
+            .clip(RoundedCornerShape(2.dp))
+            .background(color),
+    )
 }
