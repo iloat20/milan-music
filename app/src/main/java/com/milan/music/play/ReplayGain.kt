@@ -56,6 +56,12 @@ internal object ReplayGainTags {
     private const val TRACK_GAIN_KEY = "replaygain_track_gain"
     private const val ALBUM_GAIN_KEY = "replaygain_album_gain"
 
+    /**
+     * Smallest valid ID3v2.4 extended header: four bytes of syncsafe size plus the
+     * flag-byte count and flags. The size field includes itself, unlike v2.3.
+     */
+    private const val MIN_V2_4_EXTENDED_HEADER = 6
+
     /** Guards against a corrupt tag asking for an inaudible or absurd correction. */
     private const val MAX_PLAUSIBLE_DB = 60f
 
@@ -192,13 +198,21 @@ internal object ReplayGainTags {
         val tagEnd = minOf(10 + tagSize, bytes.size)
 
         if (flags and 0x40 != 0) {
-            val extendedSize = if (version >= 4) {
-                readSyncSafe(bytes, offset)
+            // v2.4's size covers the whole extended header, including its own four
+            // bytes; v2.3's excludes them. Both values come from a file the app did not
+            // write, so a negative or oversized one must be rejected before it can move
+            // `offset` backwards — a negative index crashes in the frame loop below.
+            if (version >= 4) {
+                val extendedSize = readSyncSafe(bytes, offset) ?: return null
+                if (extendedSize < MIN_V2_4_EXTENDED_HEADER || extendedSize > tagEnd - offset) {
+                    return null
+                }
+                offset += extendedSize
             } else {
-                readBe32(bytes, offset)
-            } ?: return null
-            if (extendedSize > tagEnd - offset - 4) return null
-            offset += 4 + extendedSize
+                val extendedSize = readBe32(bytes, offset) ?: return null
+                if (extendedSize < 0 || extendedSize > tagEnd - offset - 4) return null
+                offset += 4 + extendedSize
+            }
         }
 
         var trackGain: Float? = null
@@ -213,7 +227,11 @@ internal object ReplayGainTags {
                 readBe32(bytes, offset + 4)
             } ?: return null
             val dataStart = offset + 10
-            if (frameSize > tagEnd - dataStart) return null
+            // A non-positive size is malformed. The common corrupt value -10 would
+            // leave `offset` exactly where it was, spinning forever on the IO
+            // dispatcher; a larger negative one would move the next frame id before the
+            // array. Both must stop the walk rather than move it backwards.
+            if (frameSize <= 0 || frameSize > tagEnd - dataStart) return null
             if (frameId == "TXXX") {
                 val parsed = parseUserText(bytes, dataStart, dataStart + frameSize)
                 if (parsed != null) {

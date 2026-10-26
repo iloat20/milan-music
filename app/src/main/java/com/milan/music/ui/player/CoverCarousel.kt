@@ -337,7 +337,7 @@ internal fun CoverCarousel(
         // Track changes the gesture did not initiate: song end, notification, Bluetooth,
         // widget. Swipes update `pages` themselves and wait for the session, so their
         // transient state must not overwrite the shifted row.
-        LaunchedEffect(previousTrack, currentTrack, nextTrack) {
+        LaunchedEffect(previousTrack, currentTrack, nextTrack, isAnimating.value) {
             if (!isAnimating.value) {
                 publish(CoverPages(previousTrack, currentTrack, nextTrack))
             }

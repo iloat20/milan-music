@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.core.net.toUri
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
@@ -70,7 +71,13 @@ private fun Track.toCached(): CachedTrack = CachedTrack(
 )
 
 private val Context.libraryCacheStore: DataStore<Preferences> by
-    preferencesDataStore(name = "milan_library_cache")
+    preferencesDataStore(
+        name = "milan_library_cache",
+        // Read failures already degrade to an empty list, but without this the broken
+        // file survives and `save()` can never rebuild it: every launch would rescan
+        // the whole provider and every write would fail, forever.
+        corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    )
 
 /**
  * Persists the last scanned library so app launches do not hit MediaStore.

@@ -1,12 +1,15 @@
 package com.milan.music.data.userdata
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -20,7 +23,13 @@ data class UserData(
 )
 
 private val Context.userDataStore: DataStore<Preferences> by
-    preferencesDataStore(name = "milan_user_data")
+    preferencesDataStore(
+        name = "milan_user_data",
+        // The read side already falls back to empty, but without this the damaged file
+        // stays on disk and every subsequent edit throws CorruptionException — a tap on
+        // the favourite button would crash on every attempt, forever.
+        corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    )
 
 /**
  * Stores the "liked" track ids. The volume is small (hundreds at most), so a
@@ -47,10 +56,19 @@ class UserDataStore(private val context: Context) {
         } ?: UserData()
 
     private suspend fun mutate(transform: (UserData) -> UserData) {
-        context.userDataStore.edit { preferences ->
-            val current = decode(preferences[payloadKey])
-            preferences[payloadKey] =
-                json.encodeToString(UserData.serializer(), transform(current))
+        try {
+            context.userDataStore.edit { preferences ->
+                val current = decode(preferences[payloadKey])
+                preferences[payloadKey] =
+                    json.encodeToString(UserData.serializer(), transform(current))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The corruption handler repairs a damaged file on the next read, so this
+            // is the residual case (disk full, unreadable directory). Losing one tap is
+            // better than taking the process down from viewModelScope.
+            Log.w(TAG, "favourite update failed", e)
         }
     }
 
@@ -62,5 +80,9 @@ class UserDataStore(private val context: Context) {
                 userData.favorites + trackId
             },
         )
+    }
+
+    private companion object {
+        const val TAG = "UserData"
     }
 }

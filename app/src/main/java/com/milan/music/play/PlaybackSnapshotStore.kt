@@ -147,6 +147,7 @@ class PlaybackSnapshotStore(context: Context) {
     private val repeatKey = intPreferencesKey("repeat_mode")
     private val updatedAtKey = longPreferencesKey("updated_at")
     private val positionKey = longPreferencesKey("position_ms")
+    private val positionUpdatedAtKey = longPreferencesKey("position_updated_at")
     private val wasPlayingKey = booleanPreferencesKey("was_playing")
 
     suspend fun load(): PlaybackSnapshot? = withContext(Dispatchers.IO) {
@@ -155,13 +156,22 @@ class PlaybackSnapshotStore(context: Context) {
         val ids = rawIds.split(',').mapNotNull { it.toLongOrNull() }
         if (ids.isEmpty()) return@withContext null
         val position = positionPreferences()
+        val queueUpdatedAt = queue[updatedAtKey] ?: 0L
+        // The two stores are written in sequence, not atomically. A newer position is
+        // the normal ticker case; an older one means the queue edit landed and the
+        // position edit did not — the index belongs to the new track while the position
+        // belongs to the track it replaced. Starting the new track at that timestamp is
+        // worse than starting at zero. A snapshot written before this key existed has
+        // no timestamp: treat it as in sync so upgrading does not drop the position.
+        val positionUpdatedAt = position[positionUpdatedAtKey] ?: queueUpdatedAt
+        val positionIsCurrent = positionUpdatedAt >= queueUpdatedAt
         PlaybackSnapshot(
             trackIds = ids,
             currentIndex = queue[currentIndexKey] ?: 0,
-            positionMs = position[positionKey] ?: 0L,
+            positionMs = if (positionIsCurrent) position[positionKey] ?: 0L else 0L,
             shuffleModeEnabled = queue[shuffleKey] ?: true,
             repeatMode = queue[repeatKey] ?: Player.REPEAT_MODE_ALL,
-            wasPlaying = position[wasPlayingKey] ?: false,
+            wasPlaying = if (positionIsCurrent) position[wasPlayingKey] ?: false else false,
             current = queue[currentTrackKey]?.let(::decodeTrack),
             updatedAtMs = queue[updatedAtKey] ?: 0L,
         )
@@ -192,6 +202,7 @@ class PlaybackSnapshotStore(context: Context) {
         context.playbackPositionStore.edit { preferences ->
             preferences[positionKey] = snapshot.positionMs.coerceAtLeast(0L)
             preferences[wasPlayingKey] = snapshot.wasPlaying
+            preferences[positionUpdatedAtKey] = snapshot.updatedAtMs
         }
     }
 
@@ -231,6 +242,7 @@ class PlaybackSnapshotStore(context: Context) {
         context.playbackPositionStore.edit { preferences ->
             preferences[positionKey] = positionMs.coerceAtLeast(0L)
             preferences[wasPlayingKey] = wasPlaying
+            preferences[positionUpdatedAtKey] = updatedAtMs
         }
     }
 
@@ -246,8 +258,23 @@ class PlaybackSnapshotStore(context: Context) {
             context.playbackPositionStore.edit { preferences ->
                 preferences[positionKey] = positionMs.coerceAtLeast(0L)
                 preferences[wasPlayingKey] = wasPlaying
+                // The ticker only moves the position; its timestamp is newer than the
+                // queue's, which `load` reads as "position still matches this queue".
+                preferences[positionUpdatedAtKey] = System.currentTimeMillis()
             }
         }
+
+    /**
+     * Removes the snapshot entirely.
+     *
+     * Used when the queue becomes empty. Leaving the old ids behind would make the next
+     * cold start restore a queue the session no longer owns. Both stores are cleared so
+     * a later partial write cannot pair new ids with the old position.
+     */
+    suspend fun clear() = withContext(Dispatchers.IO) {
+        context.playbackQueueStore.edit { it.clear() }
+        context.playbackPositionStore.edit { it.clear() }
+    }
 
     /**
      * Maps the persisted queue onto [library] and clamps the position to the current

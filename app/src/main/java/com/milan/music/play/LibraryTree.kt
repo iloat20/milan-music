@@ -237,13 +237,35 @@ internal class LibraryTree(
             compareBy({ it.titleLabel().lowercase() }, { it.artistLabel().lowercase() }, { it.id }),
         )
 
-        val albumTracks = tracks
-            .groupBy { it.albumId }
-            .mapValues { (_, list) ->
-                list.sortedWith(
-                    compareBy({ it.trackNumber }, { it.titleLabel().lowercase() }, { it.id }),
-                )
+        // `albumId = 0` is MediaStore's "no album tag" value. Grouping on it alone put
+        // every untagged track in one container with one cover; split those by their
+        // album/artist text instead. The synthetic id is negative so it can never
+        // collide with a real MediaStore album id, and keys are assigned in sorted
+        // order so a rescan with a different row order keeps the same id.
+        val albumKey: (Track) -> String = { track ->
+            if (track.albumId > 0L) {
+                "id:${track.albumId}"
+            } else {
+                "meta:${track.albumLabel()}\u0000${track.artistLabel()}"
             }
+        }
+        val groupedByAlbum = tracks.groupBy(albumKey)
+        val syntheticIds = HashSet<Long>()
+        val albumIds = HashMap<String, Long>(groupedByAlbum.size)
+        for (key in groupedByAlbum.keys.sorted()) {
+            albumIds[key] = if (key.startsWith("id:")) {
+                key.removePrefix("id:").toLong()
+            } else {
+                var candidate = -((key.hashCode().toLong() and 0x7FFF_FFFFL) + 1L)
+                while (!syntheticIds.add(candidate)) candidate--
+                candidate
+            }
+        }
+        val albumTracks = groupedByAlbum.entries.associate { (key, list) ->
+            albumIds.getValue(key) to list.sortedWith(
+                compareBy({ it.trackNumber }, { it.titleLabel().lowercase() }, { it.id }),
+            )
+        }
         val albums = albumTracks.map { (albumId, list) ->
             AlbumEntry(
                 id = albumId,

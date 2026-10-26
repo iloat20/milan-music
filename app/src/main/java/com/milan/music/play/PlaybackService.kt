@@ -43,6 +43,7 @@ import com.milan.music.ui.text.albumText
 import com.milan.music.ui.text.artistText
 import com.milan.music.ui.text.titleText
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,8 +76,18 @@ class PlaybackService : MediaLibraryService() {
      * Main.immediate because every `Player` call the snapshot code makes has to run on
      * the application looper; the DataStore writes inside [PlaybackSnapshotStore] switch
      * to IO themselves.
+     *
+     * The handler is a last line of defence. Playback must not be killed because a tag
+     * or a cache write failed on a background coroutine; individual writes that can be
+     * recovered already catch their own failures.
      */
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main.immediate +
+            CoroutineExceptionHandler { _, throwable ->
+                Log.e(TAG, "service coroutine failed", throwable)
+            },
+    )
     private var positionJob: Job? = null
 
     private val container: AppContainer?
@@ -388,7 +399,7 @@ class PlaybackService : MediaLibraryService() {
             return MediaSession.MediaItemsWithStartPosition(
                 listOf(item),
                 /* startIndex = */ 0,
-                snapshot.positionMs.coerceAtLeast(0L),
+                clampedPosition(snapshot.positionMs, currentTrack),
             )
         }
 
@@ -436,8 +447,22 @@ class PlaybackService : MediaLibraryService() {
         return MediaSession.MediaItemsWithStartPosition(
             items,
             startIndex,
-            snapshot.positionMs.coerceAtLeast(0L),
+            clampedPosition(snapshot.positionMs, currentTrack),
         )
+    }
+
+    /**
+     * Keeps a restored timestamp inside the item it belongs to.
+     *
+     * The snapshot can outlive the file: re-encoding a track shortens it, and a saved
+     * position near the old end would restore already finished. The in-app path clamps
+     * in [PlaybackSnapshotStore.restore]; the platform resumption path builds the item
+     * list itself and needs the same guard.
+     */
+    private fun clampedPosition(positionMs: Long, track: Track?): Long {
+        val position = positionMs.coerceAtLeast(0L)
+        val duration = track?.duration ?: 0L
+        return if (duration > 0L) position.coerceAtMost(duration) else position
     }
 
     /**
@@ -461,7 +486,14 @@ class PlaybackService : MediaLibraryService() {
             return
         }
         val count = player.mediaItemCount
-        if (count == 0) return
+        if (count == 0) {
+            // A cleared queue must not leave the old ids behind: the next cold start
+            // would resurrect a queue the session no longer owns.
+            if (saveSnapshotSafely("clear", ::logSnapshotFailure) { store.clear() }) {
+                Log.d(TAG, "snapshot cleared (empty queue)")
+            }
+            return
+        }
         val ids = ArrayList<Long>(count)
         var current = -1
         for (index in 0 until count) {

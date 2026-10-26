@@ -6,6 +6,7 @@ import com.milan.music.data.model.Track
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -73,18 +74,20 @@ internal class ReplayGainReader(context: Context) {
         }
     }
 
-    private fun readGain(track: Track): Float? {
-        val header = try {
-            contentResolver.openInputStream(track.uri)?.use { stream ->
-                readHead(stream)
-            }
-        } catch (e: Exception) {
-            // A file that disappeared between scan and playback is not an error worth
-            // surfacing: the track simply plays at its mastered level.
-            Log.w(TAG, "replaygain read failed id=${track.id}", e)
-            null
-        }
-        return header?.let(ReplayGainTags::parse)
+    private fun readGain(track: Track): Float? = try {
+        contentResolver.openInputStream(track.uri)?.use { stream ->
+            readHead(stream)
+        }?.let(ReplayGainTags::parse)
+    } catch (e: CancellationException) {
+        // Structured concurrency: the service is going away, not the file.
+        throw e
+    } catch (e: Exception) {
+        // A file that disappeared between scan and playback is not an error worth
+        // surfacing, and neither is a malformed tag: the track simply plays at its
+        // mastered level. This runs on the transition path, so anything escaping here
+        // reaches the process as a crash.
+        Log.w(TAG, "replaygain read failed id=${track.id}", e)
+        null
     }
 
     /**

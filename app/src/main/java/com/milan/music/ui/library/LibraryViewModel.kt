@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +79,9 @@ class LibraryViewModel(
 
     /** The scan currently in flight, if any. See [launchScan] for why it exists. */
     private var scanJob: Job? = null
+
+    /** A refresh arrived while a scan was running; run it once that scan finishes. */
+    private var pendingRefresh = false
 
     /** Immediate text, used by the search field so typing never feels laggy. */
     val query: StateFlow<String> = queryInput.asStateFlow()
@@ -220,7 +224,25 @@ class LibraryViewModel(
                 val audible = playbackStartGate.awaitAudible(SCAN_DEFER_TIMEOUT_MS)
                 Log.i(TAG, "reconcile scan deferred audible=$audible")
             }
-            val scan = mediaStore.scanTracks(plan.mode)
+            var scan = mediaStore.scanTracks(plan.mode)
+
+            // With no cache there is nothing to compare against: an interrupted cursor
+            // and a genuinely empty library both look like zero rows. Retry a couple of
+            // times before publishing "empty" and declaring the load finished, otherwise
+            // a transient provider answer leaves the app on an empty screen with no
+            // automatic way back (ensureLoaded is keyed on the permission grant, which
+            // does not change again).
+            var attempt = 0
+            while (
+                cached.isEmpty() &&
+                !shouldApplyScan(scan.tracks.size, scan.complete, cached.size) &&
+                attempt < EMPTY_SCAN_RETRIES
+            ) {
+                attempt++
+                Log.w(TAG, "first scan incomplete; retrying attempt=$attempt")
+                delay(EMPTY_SCAN_RETRY_DELAY_MS)
+                scan = mediaStore.scanTracks(plan.mode)
+            }
 
             // Two cases must leave the cached library alone: an interrupted cursor
             // (partial rows) and a transiently empty provider. Both are indistinguishable
@@ -233,6 +255,9 @@ class LibraryViewModel(
                         "cached=${cached.size}; keeping the cache and retrying next launch",
                 )
                 loading.value = false
+                // Let a later ensureLoaded (permission resume, future caller) try again
+                // instead of treating this failed load as final.
+                if (cached.isEmpty()) cacheLoaded = false
                 return@launchScan
             }
 
@@ -261,6 +286,10 @@ class LibraryViewModel(
 
     /** Forces a fresh MediaStore scan and rewrites the cache. */
     fun refresh() {
+        if (scanJob?.isActive == true) {
+            pendingRefresh = true
+            return
+        }
         launchScan { scan() }
     }
 
@@ -289,6 +318,16 @@ class LibraryViewModel(
                 cacheLoaded = false
                 loading.value = false
                 Log.w(TAG, "library scan failed; the next request retries", e)
+            } finally {
+                scanJob = null
+                // A refresh requested while this scan ran was dropped by the dedupe.
+                // Run it now: the toast already told the user a rescan was happening,
+                // and an import made after the scan started would otherwise stay
+                // invisible until they tapped again.
+                if (pendingRefresh) {
+                    pendingRefresh = false
+                    refresh()
+                }
             }
         }
     }
@@ -335,6 +374,8 @@ class LibraryViewModel(
 
     companion object {
         private const val QUERY_DEBOUNCE_MS = 180L
+        private const val EMPTY_SCAN_RETRIES = 2
+        private const val EMPTY_SCAN_RETRY_DELAY_MS = 1_200L
         private const val TAG = "LibraryViewModel"
 
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {

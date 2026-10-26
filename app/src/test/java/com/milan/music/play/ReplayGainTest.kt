@@ -335,6 +335,26 @@ class ReplayGainRobustnessTest {
         assertNull(ReplayGainTags.parse(id3WithFrameSize(Int.MAX_VALUE)))
     }
 
+    /**
+     * A negative frame size used to leave `offset` exactly where it was, spinning the
+     * frame loop forever on the IO dispatcher. The timeout turns a regression into a
+     * failed test instead of a hung suite.
+     */
+    @Test(timeout = 2_000)
+    fun `a negative frame length returns nothing`() {
+        assertNull(ReplayGainTags.parse(id3WithFrameSize(-10)))
+    }
+
+    @Test
+    fun `a negative extended header returns nothing`() {
+        assertNull(ReplayGainTags.parse(id3WithExtendedHeader(Int.MIN_VALUE)))
+    }
+
+    @Test
+    fun `an id3v2_4 extended header is measured including its own size field`() {
+        assertEquals(1.5f, gainOf(id3v24WithExtendedHeader("+1.50 dB")), 0.01f)
+    }
+
     @Test
     fun `a huge block length returns nothing`() {
         assertNull(ReplayGainTags.parse(flacWithBlockLength(Int.MAX_VALUE)))
@@ -438,3 +458,21 @@ private fun id3WithFrameSize(size: Int): ByteArray = ByteArrayOutputStream().app
     write(0)
     write(ByteArray(10))
 }.toByteArray()
+
+/**
+ * ID3v2.4 extended header: the syncsafe size covers the whole header, including the
+ * four bytes that hold the size itself. A parser that adds another four skips the first
+ * four bytes of the following frame and reads its id at the wrong offset.
+ */
+private fun id3v24WithExtendedHeader(gain: String): ByteArray {
+    val extended = syncSafe(6) + byteArrayOf(0, 0)
+    val body = extended + txxx("REPLAYGAIN_TRACK_GAIN", gain, version = 4)
+    return ByteArrayOutputStream().apply {
+        write("ID3".toByteArray())
+        write(4)
+        write(0)
+        write(0x40)
+        write(syncSafe(body.size))
+        write(body)
+    }.toByteArray()
+}

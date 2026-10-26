@@ -60,6 +60,15 @@ class LibraryTreeTest {
     }
 
     @Test
+    fun `negative album ids round trip`() {
+        // Untagged albums get a synthetic negative id so they can be split by name
+        // without colliding with any real MediaStore album id.
+        val id = LibraryIds.album(-42L)
+        assertEquals("lib:album:-42", id)
+        assertEquals(-42L, LibraryIds.albumId(id))
+    }
+
+    @Test
     fun `artist ids round trip unicode and separators`() {
         listOf("周杰伦", "AC/DC: Live", "a:b/c", "", "🎵 artist").forEach { name ->
             val id = LibraryIds.artist(name)

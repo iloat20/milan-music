@@ -422,7 +422,6 @@ class PlayerController(
     private fun refresh() {
         val mediaController = controller ?: return
         val mediaItem = mediaController.currentMediaItem
-        val metadata = mediaItem?.mediaMetadata
         // Shuffle reorders the playback sequence, so `currentMediaItemIndex` is a
         // position in the shuffled order — not an index into `queue`. The only
         // correct lookup is by mediaId; the index fallback fires only before any
@@ -466,19 +465,17 @@ class PlayerController(
                 nextTrack = nextTrack,
                 isPlaying = mediaController.isPlaying,
                 queueSize = mediaController.mediaItemCount,
-            ).let { next ->
-                if (next.currentTrack == null && metadata != null) {
-                    next.copy(currentTrack = previous.currentTrack)
-                } else {
-                    next
-                }
-            }
+            )
         }
 
-        _progress.update { previous ->
+        _progress.update {
             PlaybackProgress(
                 positionMs = mediaController.currentPosition.coerceAtLeast(0L),
-                durationMs = mediaController.duration.takeIf { it > 0L } ?: previous.durationMs,
+                // Never carry the previous track's duration across a transition. While
+                // the new item is still preparing `duration` is unset; the player
+                // screen's fallback (the track's own metadata) is then the honest
+                // value, whereas an old duration makes the bar show the wrong length.
+                durationMs = mediaController.duration.coerceAtLeast(0L),
             )
         }
 
@@ -513,11 +510,10 @@ class PlayerController(
             while (isActive) {
                 val mediaController = controller ?: break
                 if (!mediaController.isPlaying) break
-                _progress.update { current ->
+                _progress.update {
                     PlaybackProgress(
                         positionMs = mediaController.currentPosition.coerceAtLeast(0L),
-                        durationMs = mediaController.duration.takeIf { it > 0L }
-                            ?: current.durationMs,
+                        durationMs = mediaController.duration.coerceAtLeast(0L),
                     )
                 }
                 delay(PROGRESS_INTERVAL_MS)
