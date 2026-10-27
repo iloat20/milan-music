@@ -37,28 +37,30 @@ class ReflectionLayersTest {
     }
 
     @Test
-    fun `the ladder draws three layers and keeps the seam blur`() {
-        // 每一级都是**一次全屏离屏合成 + 一次 `Modifier.blur`**：1080×2400 上每层约
-        // 10MB 缓冲，5 层合计约 50MB GPU 内存。2026-10-27 定为 3 层（4 个 stop，index 0
-        // 由清晰封面本体承担）。
+    fun `the ladder keeps four stops and the mirror line is sharp`() {
+        // 每一级都是一次全屏离屏合成，半径 > 0 的那三层还要各自一次 `Modifier.blur`。
+        // 第 78 批曾收到 3 层（去掉 `2dp` 与 `22dp`），第 82 批因为**起点归零**必须把
+        // 清晰层也画出来（见 [DrawnLayers]），所以绘制层数回到 4 —— 但没有多一次模糊。
         //
         // 这条不写就守不住：加一级不会有任何编译或运行期提示，只有中低端机的掉帧会说
         // 出来 —— 而那时已经找不到是哪次改动加的了。
-        assertEquals("阶梯只画 3 层（stop 数 = 绘制层数 + 1）", 4, BlurRamp.size)
-        assertEquals(listOf(0f, 5f, 12f, 34f), BlurRamp.map { it.radius.value })
+        assertEquals("阶梯 stop 数 = 绘制层数（清晰层也要画）", 4, BlurRamp.size)
+        assertEquals(listOf(0f, 12f, 24f, 34f), BlurRamp.map { it.radius.value })
 
-        // 层数与半径可以变，**这两条不能**：
-        //  - 过渡带高度一变，封面正文被糊掉的范围就变了；
-        //  - 镜面线的糊度是接缝的锚点，改了等于重画接缝。
-        assertEquals("过渡带高度", 128.dp, CoverRamp)
-        assertEquals(12.dp, BlurRamp[SeamStopIndex].radius)
+        // **封面侧不许再有过渡带**（用户 2026-10-27）：真正要守的是**阶梯起点**。
+        // 第 84 批起 `CoverRamp` 不再是过渡带，而是出血（= 最大模糊半径），变大不糊封面；
+        // 但起点一旦回到负数，"封面底部那条条状模糊"就回来了。
+        assertEquals("阶梯起点必须在镜面线", 0.dp, BlurRamp.first().at)
+        assertEquals("镜面线处必须清晰", 0.dp, BlurRamp[SeamStopIndex].radius)
 
-        // 等效曲线必须与 6 级时基本重合（离线对照见 `review/ramp3-compare.py`）：
-        // 掉的那两级几乎落在邻两级的连线上，所以 blurAt 的偏差在 1.5dp 以内。
-        // 这条是"少画两层但画质不塌"的可验证形式 —— 只断言层数会把这件事交给肉眼。
-        assertEquals(5f, blurAt(-44.dp).value, 0.01f)
-        assertEquals(12f, blurAt(0.dp).value, 0.01f)
-        assertEquals(20.8f, blurAt(96.dp).value, 1.5f)
+        // 等效曲线：0dp 清晰 → 16dp 糊到 12dp → 64dp 到 24dp → 160dp 到 34dp。
+        // 前两段是**清晰层的让位距离**（第 83 批从 32dp 收短到 16dp）：它决定倒影顶端
+        // 有多少内容还读得出原样，是用户"倒影顶端太清楚"那条反馈的唯一旋钮。
+        assertEquals(0f, blurAt(0.dp).value, 0.01f)
+        assertEquals(12f, blurAt(16.dp).value, 0.01f)
+        assertEquals(24f, blurAt(64.dp).value, 0.01f)
+        assertEquals(34f, blurAt(160.dp).value, 0.01f)
+        assertEquals(6f, blurAt(8.dp).value, 0.01f)
     }
 
     @Test
@@ -86,10 +88,12 @@ class ReflectionLayersTest {
 
     @Test
     fun `the mirror line owns a step of its own`() {
-        // 镜面线必须落在一级的正中间，而不是两级之间。落了才谈得上"两侧同一次模糊"。
-        assertTrue("阶梯里必须有一级正好在镜面线上", SeamStopIndex > 0)
+        // 镜面线必须落在一级的正中间，而不是两级之间：落了才谈得上"这里的内容由
+        // 恰好一个图层决定"。第 82 批起它就是阶梯的第 0 级 —— 半径 0，也就是清晰镜像。
+        assertEquals("镜面线必须是第 0 级", 0, SeamStopIndex)
         assertEquals(0f, BlurRamp[SeamStopIndex].at.value, 1e-4f)
         assertEquals(BlurRamp[SeamStopIndex].radius, blurAt(0.dp))
+        assertEquals("镜面处不许有模糊", 0.dp, blurAt(0.dp))
     }
 
     @Test
@@ -117,28 +121,74 @@ class ReflectionLayersTest {
     }
 
     @Test
-    fun `the top of the band is handed back to the sharp cover`() {
-        // 过渡带顶端所有模糊层的权重必须是 0：那里画面完全由清晰封面本体承担，
-        // 所以带子的起点没有任何可见的边界 —— 这是"模糊不要突然开始"的关键。
-        for (index in 1..BlurRamp.lastIndex) {
-            assertEquals("w[$index] at band top", 0f, layerWeight(index, BlurRamp.first().at), 1e-4f)
+    fun `the cover is never touched by a blurred layer`() {
+        // 第 82 批的核心：封面侧（镜面线以上）只有清晰层，且权重恒为 1。
+        // 任何一层模糊层在这里拿到非 0 权重，封面就会被糊掉一块 —— 那就是用户
+        // 2026-10-27 说的"上面的一个条状模糊"。
+        for (y in listOf(-200.dp, -128.dp, -64.dp, -8.dp, -0.5.dp)) {
+            for (index in 1..BlurRamp.lastIndex) {
+                assertEquals("w[$index] 越界到封面侧 $y", 0f, layerWeight(index, y), 1e-4f)
+            }
+            assertEquals("封面侧 $y 应全由清晰层承担", 1f, layerWeight(0, y), 1e-4f)
         }
-        assertEquals(1f, layerWeight(0, BlurRamp.first().at), 1e-4f)
     }
 
     @Test
-    fun `the mirror line is drawn by exactly one opaque layer`() {
-        // 镜面线上：清晰层让位（=0，否则两侧糊度不等）、模糊层里恰好一级满权重。
-        // 上一版镜面处 alpha 只有 0.7，整行 242 列同时暗 11/255（4.3%）。
-        assertEquals(0f, layerWeight(0, 0.dp), 1e-4f)
-        assertEquals(1f, layerWeight(SeamStopIndex, 0.dp), 1e-4f)
-        val drawn = (1..BlurRamp.lastIndex).sumOf { layerWeight(it, 0.dp).toDouble() }
-        assertEquals("镜面处必须满不透明", 1.0, drawn, 1e-4)
+    fun `the ladder starts exactly at the mirror line`() {
+        // 阶梯起点 = 镜面线 = 0dp。大于 0 就是"封面底部又被糊了一段"，
+        // 小于 0 就是过渡带压回封面上 —— 两个方向都红。
+        assertEquals(0f, BlurRamp.first().at.value, 1e-4f)
+    }
+
+    @Test
+    fun `the mirror line is drawn by exactly the sharp layer`() {
+        // 镜面线上：清晰层满权重（它就是封面最后一行倒过来的那一行，与封面同内容），
+        // 所有模糊层为 0。接缝两侧因此是同一份内容、同一个清晰度 —— 不是调参调没的。
+        assertEquals(1f, layerWeight(0, 0.dp), 1e-4f)
         for (index in 1..BlurRamp.lastIndex) {
-            if (index != SeamStopIndex) {
-                assertEquals("w[$index] at seam", 0f, layerWeight(index, 0.dp), 1e-4f)
-            }
+            assertEquals("w[$index] at seam", 0f, layerWeight(index, 0.dp), 1e-4f)
         }
+    }
+
+    @Test
+    fun `the sharp layer must be drawn by the overlay`() {
+        // 第 82 批最容易踩空的一条：清晰层的权重以前由"不透明的封面本体"补上，
+        // 现在封面在镜面线就结束了 —— 叠层若不画它，镜面下方的覆盖率只剩
+        // `1 − Π(1−w_i)`：16dp 处 0.75、32dp 处直接归零，色场透出一条背景色带。
+        assertEquals("叠层必须含清晰层", 0, DrawnLayers.first())
+        assertEquals(BlurRamp.lastIndex, DrawnLayers.last)
+        assertTrue("每一级都要画", DrawnLayers.count() == BlurRamp.size)
+
+        // 缺了清晰层会掉多少：把两种画法的覆盖率算出来摆在这里。
+        // （级联 alpha 有个漂亮的性质：`Π(1−a_i) = w_0`，所以不画清晰层时覆盖率
+        // 恰好等于 `1 − w_0` —— 镜面线上直接是 0，也就是一条完全透明的缝。）
+        fun coverage(range: IntRange, y: Dp): Float {
+            var remaining = 1f
+            for (index in range) remaining *= (1f - cascadeAlpha(index, y))
+            return 1f - remaining
+        }
+        assertEquals("镜面线上只剩糊层 = 全透明", 0f, coverage(1..3, 0.dp), 1e-3f)
+        assertEquals("镜下 8dp 只补得上一半", 0.5f, coverage(1..3, 8.dp), 0.01f)
+        assertEquals("16dp 才追平", 1f, coverage(1..3, 16.dp), 0.01f)
+        assertEquals("画了清晰层就满", 1f, coverage(DrawnLayers, 16.dp), 1e-4f)
+    }
+
+    @Test
+    fun `the sharp layer hands the top of the reflection over quickly`() {
+        // 第 83 批（用户 2026-10-27："倒影顶端太清楚"）。清晰层半径是 0，所以它覆盖的
+        // 那一段倒影是**未经过任何模糊的真实镜像**：让位距离 32dp 时，镜下 8dp 处
+        // 84%、16dp 处 50%、24dp 处 16% 都是真的 —— 封面底部那条深色斜边被原样倒过来
+        // 摆在那儿，读起来就是"封面底部又复制了一份"。
+        //
+        // 这条守的是**上限**：让位距离长回去就红。绝不能靠"把首级半径提上去"来解决，
+        // 那会让镜面线两侧清晰度不等，出现一道清晰度断崖（第 54 批九轮返工的起点）。
+        val handover = BlurRamp[1].at
+        assertTrue("清晰层让位超过 20dp：${handover.value}", handover <= 20.dp)
+        assertTrue("清晰层太短，镜下没有真实镜像：${handover.value}", handover >= 8.dp)
+        assertEquals("镜面线处必须是真实镜像", 0.dp, BlurRamp[SeamStopIndex].radius)
+
+        assertEquals("镜下 8dp 还有一半是真实镜像", 0.5f, layerWeight(0, 8.dp), 0.02f)
+        assertEquals("镜下 16dp 已全部交给模糊层", 0f, layerWeight(0, 16.dp), 1e-4f)
     }
 
     @Test
@@ -179,55 +229,114 @@ class ReflectionLayersTest {
     }
 
     @Test
-    fun `the cover ramp is a third of the frame at most`() {
-        // 过渡带太长会把封面正文（这里正好是专辑名）糊掉，太短则"模糊突然开始"。
-        assertTrue("CoverRamp 太小：${CoverRamp.value}", CoverRamp >= 96.dp)
-        assertTrue("CoverRamp 太大：${CoverRamp.value}", CoverRamp <= 160.dp)
+    fun `the stacked layers reproduce the exact weighted average`() {
+        // 把 Compose 的合成过程照原样演一遍：按 [DrawnLayers] 的顺序（清晰 → 糊）
+        // 一层层"盖上去"，每层 alpha 取 [cascadeAlpha]。两条结论必须同时成立：
+        //
+        //  - 颜色等于**精确的加权平均** `Σ w_i·L_i`（不是近似，也不是重影）；
+        //  - 合成完的 alpha 恒为 1 —— 倒影下方不许透出色场。
+        //
+        // 第 82 批之前这两条都靠"封面不透明"顶着：过渡带压在封面上，缺的 alpha 由
+        // 封面补。封面侧归零之后没人补，只能靠归一化级联自己站住。
+        val layers = listOf(0.2f, 0.55f, 0.8f, 1f) // 四个任意"像素值"
+        for (y in listOf(0.dp, 4.dp, 16.dp, 24.dp, 32.dp, 56.dp, 100.dp, 160.dp, 260.dp)) {
+            var color = 0f
+            var alpha = 0f
+            for (index in DrawnLayers) {
+                val a = cascadeAlpha(index, y)
+                color = a * layers[index] + (1f - a) * color
+                alpha = a + (1f - a) * alpha
+            }
+            val expected = BlurRamp.indices
+                .sumOf { (layerWeight(it, y) * layers[it]).toDouble() }
+                .toFloat()
+            assertEquals("$y 处不是加权平均", expected, color, 1e-4f)
+            assertEquals("$y 处透底了", 1f, alpha, 1e-4f)
+        }
     }
 
     @Test
     fun `mask samples start at the top of the node and end at the page bottom`() {
-        for (index in 1..BlurRamp.lastIndex) {
-            val alphas = maskAlphas(index, height)
+        for (index in DrawnLayers) {
+            val alphas = cascadeAlphas(index, height)
             assertEquals("采样段数必须按节点高度定", maskSamplesFor(node()), alphas.size)
-            assertEquals("w[$index] at node top", 0f, alphas.first(), 1e-4f)
-            assertEquals("w[$index] at page bottom", 0f, alphas.last(), 1e-4f)
+            if (index == 0) {
+                // 清晰层：镜面线上满 α（它是倒影的第一行），第一个采样点不可能是 0。
+                assertEquals("w[0] at node top", 1f, alphas.first(), 1e-4f)
+            } else {
+                assertEquals("w[$index] at node top", 0f, alphas.first(), 1e-4f)
+            }
         }
+        // 衰减不在这几层里 —— 它在父层，必须自己收干净。
         val fade = fadeAlphas(height)
+        assertEquals("衰减在镜面线上必须满", 1f, fade.first(), 1e-4f)
         assertEquals("衰减在页底必须收干净", 0f, fade.last(), 1e-4f)
     }
 
     @Test
-    fun `sampling the envelope loses less than a pixel of alpha`() {
-        // 包络是"权重 × 衰减"的乘积，只能采样成多段线性渐变。采样太稀会读出带状：
-        // 阶梯里最窄的一段（-44dp → 0dp）只跨 44dp，步长超过它的一半就会顶出
-        // 2%（≈5/255）的台阶 —— 第 54 批就是这一条先红，才把采样改成自适应的。
+    fun `the fade and the cascade share one sample range`() {
+        // 两条曲线画在**同一个** Box 上（fade 父层 + 各层自己的 mask），采样区间必须逐点
+        // 对齐，区间长度也必须等于节点高度。分头采样的后果 2026-10-27 第 85 批见过真机：
+        // 顶层 Box 只铺 `bottom` 高、包络却按 `bleed + bottom` 采，再加上图层的翻折轴在
+        // 自身 y = bleed 处，整块倒影被下推 34dp —— 镜下留出一条 **34.0dp 的空白带**
+        // （实测 std 22，正常倒影 60~80，宽度正好等于 `CoverRamp`）。
+        val fade = fadeAlphas(height)
+        assertEquals("衰减段数必须按节点高度定", maskSamplesFor(node()), fade.size)
+        for (index in DrawnLayers) {
+            assertEquals(
+                "layer $index 与 fade 的采样段数必须相同",
+                fade.size,
+                cascadeAlphas(index, height).size,
+            )
+        }
+        // 出血区里衰减必须是满的：DstIn 一旦把出血裁掉，图层就被裁短、倒影同样下移。
+        assertEquals("出血顶端衰减必须满", 1f, fade.first(), 1e-4f)
+        // 镜面线在节点内的位置是 `CoverRamp`（不是 0）：清晰层在那里必须满 α，
+        // 否则倒影顶端会先空一段再开始 —— 与"图层被下推"是同一种可见结果。
+        assertEquals(
+            "镜面线上的清晰层必须满 α",
+            1f,
+            sampleAt(cascadeAlphas(0, height), node(), CoverRamp),
+            1e-4f,
+        )
+    }
+
+    @Test
+    fun `sampling the envelope keeps the composite within two percent`() {
+        // 包络（级联 alpha）只能采样成多段线性渐变，采样步长 4dp。阶梯里最窄的一段
+        // （0 → 32dp）跨 32dp，步长超过它的一半就会顶出 2%（≈5/255）的台阶。
+        //
+        // 判的是**合成结果**，不是单层的 alpha：某一层的 alpha 会在它的权重刚归零
+        // 的那一刻从 1 跳到 0（它已经交棒给下一层），但那时它的权重也是 0，
+        // 采样误差乘上去只剩几百分之一 —— 单层上会红，画面上看不见。
         val total = node()
-        for (index in 1..BlurRamp.lastIndex) {
-            val alphas = maskAlphas(index, height)
-            var y = BlurRamp.first().at
-            while (y <= height) {
-                val exact = layerWeight(index, y) * fadeAt(y, height)
-                val sampled = sampleAt(alphas, total, y + CoverRamp)
-                assertEquals("layer $index at $y", exact, sampled, 0.02f)
-                y += 1.dp
+        val layers = listOf(0f, 0.35f, 0.7f, 1f)
+        for (yInt in 0..height.value.toInt()) {
+            val y = yInt.dp
+            var sampledColor = 0f
+            var sampledAlpha = 0f
+            for (index in DrawnLayers) {
+                val a = sampleAt(cascadeAlphas(index, height), total, y + CoverRamp)
+                sampledColor = a * layers[index] + (1f - a) * sampledColor
+                sampledAlpha = a + (1f - a) * sampledAlpha
             }
+            val exact = BlurRamp.indices
+                .sumOf { (layerWeight(it, y) * layers[it]).toDouble() }
+                .toFloat()
+            assertEquals("$y 处采样后的颜色", exact, sampledColor, 0.02f)
+            assertEquals("$y 处采样后的不透明度", 1f, sampledAlpha, 0.02f)
         }
     }
 
     @Test
-    fun `the drawn layers sum to one at the mirror line and to nothing overhead`() {
-        // 把"叠加后的不透明度"直接算出来：镜面线上必须 1（否则底色透出），
-        // 带子顶端必须 0（否则又变成与封面交叉淡入的重影）。
-        fun drawnAlpha(y: Dp): Float =
-            (1..BlurRamp.lastIndex).sumOf {
-                (layerWeight(it, y) * fadeAt(y, height)).toDouble()
-            }.toFloat()
-
-        assertEquals(1f, drawnAlpha(0.dp), 1e-3f)
-        assertEquals(0f, drawnAlpha(BlurRamp.first().at), 1e-4f)
-        // 镜面线两侧：同一条曲线，差值为 0（结构上不可能有台阶）。
-        assertEquals(drawnAlpha(0.dp), drawnAlpha(-0.5.dp), 1e-3f)
+    fun `the reflection is opaque on every row below the mirror line`() {
+        // 第 82 批的底线：镜头下方每一行的覆盖率都必须是 1。少一分就透一分色场，
+        // 而那个位置的色场是 palette.bottom 与渐变 —— 透出来就是一条横向色带。
+        for (y in 0..height.value.toInt() step 1) {
+            var remaining = 1f
+            for (index in DrawnLayers) remaining *= (1f - cascadeAlpha(index, y.dp))
+            assertEquals("$y dp 处透底", 0f, remaining, 1e-4f)
+        }
     }
 
     @Test
@@ -239,13 +348,40 @@ class ReflectionLayersTest {
     }
 
     @Test
+    fun `the bleed covers exactly the largest blur radius`() {
+        // 第 84 批（用户 2026-10-27「中间接缝为什么会黑色」）。
+        //
+        // 叠层是 4 个离屏图层（`graphicsLayer(Offscreen)` + 三层 `Modifier.blur`），
+        // 它们的顶边如果正好压在镜面线上，边缘会掉 alpha —— 一侧是封面、一侧是倒影，
+        // 缺口就成了一条横贯全宽的黑线。873×1920 真机实测：y 957~962 亮度 1~4，
+        // 两侧 90~105，中心正落在镜面线（镜像对称扫描 y=959）；而第 54~81 批的旧版
+        // 截图在同一位置是平滑过渡，**没有这条线** —— 因为那时顶边在封面上方 128dp。
+        //
+        // 出血量必须 ≥ **最大**模糊半径：否则最糊那一层的模糊核仍然跨过镜面线，
+        // 边缘衰减落在可见区里。这条等式就是"够不够"的唯一判据。
+        val maxRadius = BlurRamp.maxOf { it.radius }
+        assertEquals("出血必须正好是最大模糊半径", maxRadius.value, CoverRamp.value, 1e-4f)
+        assertTrue("出血不能缩到最大半径以下", CoverRamp >= maxRadius)
+
+        // 出血区里不许有任何模糊层：那里留空，露出来的就是封面本体。
+        var y = -CoverRamp
+        while (y < 0.dp) {
+            for (index in 1..BlurRamp.lastIndex) {
+                assertEquals("w[$index] at $y 必须为 0", 0f, layerWeight(index, y), 1e-4f)
+            }
+            assertEquals("清晰层横跨整段出血", 1f, layerWeight(0, y), 1e-4f)
+            y += 2.dp
+        }
+    }
+
+    @Test
     fun `reflection overlay must not claim layout height`() {
         // 叠层画 557dp（CoverRamp + 倒影高），但**必须向 Column 报告 0 高度**。
         // 2026-10-23 第 55 批真机：照实报告后 Column 把它当占位，PlayerTransport 从
         // 986dp 开始排，整屏只剩封面，歌名 / 进度条 / 播放键全部出界。
         assertEquals("叠层报告的排版高度", 0.dp, OverlayLayoutHeight)
         assertTrue("但绘制高度必须远大于 0", overlayDrawHeight(height) > 0.dp)
-        assertEquals("绘制高度 = 过渡带上半 + 倒影", CoverRamp + height, overlayDrawHeight(height))
+        assertEquals("绘制高度 = 出血 + 倒影", CoverRamp + height, overlayDrawHeight(height))
         // 退化路径（没有 RenderEffect）不向上溢出，几何上就是倒影本身。
         assertEquals(height, overlayDrawHeight(height, ramp = false))
     }
@@ -257,7 +393,7 @@ class ReflectionLayersTest {
         val drawn = overlayDrawHeight(height)
         assertTrue("画出来的比占的多，多出来的部分全靠越界绘制", drawn > OverlayLayoutHeight)
         assertEquals(
-            "差值只能是过渡带本身",
+            "差值只能是出血本身",
             CoverRamp,
             drawn - OverlayLayoutHeight - height,
         )

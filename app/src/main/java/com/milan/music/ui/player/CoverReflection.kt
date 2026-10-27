@@ -49,52 +49,96 @@ import kotlin.math.roundToInt
 internal data class BlurStop(val radius: Dp, val at: Dp)
 
 /**
- * 封面的模糊阶梯 —— 这是这一版的**全部**设计。
+ * 封面的模糊阶梯 —— 从镜面线**往下**才开始的模糊。
  *
  * 上一版（第 45~53 批）是"同一张图的清晰版与糊版按透明度交叉淡入"，那在物理上就是
  * **重影**：中段同时看得见清晰的边和它的糊影，读起来既不像照片也不像倒影，真机截图
  * 里过渡带整段 RMS 掉到 0.36~0.51（清晰封面是 5.9）—— 这就是用户说的"模糊不好看、
- * 不自然"。正确做法是让**半径**连续变化，而每一级都保持满不透明。
+ * 不自然"。正确做法是让**半径**连续变化，而不是让两层互相淡入淡出。
  *
- * 阶梯在**起点附近压得很平**（0 → 5），把半径的增长让给最后一段 —— 封面正文（这里
- * 正好压着专辑名那一行）因此还能读，而接缝两侧已经糊得足够。相邻两级最多差 2.9 倍
- * （34/12），交接时看不出"换了一层"。镜面线（0）正好落在二级的正中间，所以两侧共用
- * **同一次**模糊、**同一张位图的相邻两行** —— 接缝在结构上不可能出现，不是调参调没的。
+ * ## 第 82 批：封面侧不再有过渡带（用户 2026-10-27）
  *
- * 第 0 级（半径 0）不由这个组件画，它由**清晰封面本体**承担：阶梯最上面那一段的
- * 权重天然让位给封面，所以过渡带的起点没有任何边界（那里阶梯权重恰好为 0）。
+ * 第 54~81 批的阶梯起点在镜面线**以上** 128dp，也就是封面自己的最后 128dp 被逐级
+ * 糊掉。设计意图是"接缝两侧由同一图层相邻两行画出"，代价却是**封面正文被涂糊**：
+ * 真机截图（873×1920）量到 y 674→960 整段清晰度从 7.06 掉到 1.80，用户原话
+ * "模糊的地方好像不对，上面的一个条状模糊应该取消"。
  *
- * ## 为什么是 4 个 stop（3 个绘制层）
+ * 现在的几何：**封面一直清晰到镜面线**，阶梯全部落在镜面线以下 ——
+ * 镜面线处半径 0（倒影第一行就是封面的最后一行，所以接缝两侧的清晰度按构造相等），
+ * 往下 16dp 糊到 12dp、64dp 到 24dp、160dp 到 34dp。倒影因此读作"紧贴物体的镜面反射，
+ * 越往下越化开"，而封面一个字都不糊。
  *
- * 每一级都是一次全屏离屏合成 + 一次 `Modifier.blur`，1080×2400 上每层约 10MB 缓冲。
- * 第 78 批之前是 6 个 stop（5 层，约 50MB GPU），2026-10-27 按用户决定收到 3 层。
+ * ## 第 83 批：清晰层让位从 32dp 收到 16dp
  *
- * 去掉的是 `2dp @ -86dp` 与 `22dp @ 96dp`，因为它们**几乎落在邻两级的连线上**：
- * `blurAt(-86)` 由 2 变 2.5、`blurAt(96)` 由 22 变 20.8，全曲线偏差 ≤1.2dp。离线对照
- * （`review/ramp3-compare.py`，与 [layerWeight]/[fadeAt] 逐行同源）实测：
- * 接缝 ±8dp **逐像素完全相同**，封面过渡带平均差 0.13/255（最大 11），镜下 0..64dp
- * 平均 3.1（最大 12），64..128dp 平均 7.9（最大 17）—— 最后一段糊一些，那里
- * [fadeAt] 已经衰减到 50% 以下，且"糊一点"正好压掉第二张封面的可辨识度。
+ * 第 82 批把带子归零之后，镜下最内那一级（半径 0 = **未经过任何模糊的真实镜像**）
+ * 铺了整整 32dp：实测镜下 8dp 处还有 84% 是真实镜像、16dp 处 50%、24dp 处 16%。
+ * 用户看到的"倒影顶端太清楚"就是它 —— 封面底部那条深色斜边被原样倒过来，读起来
+ * 像"封面底部又复制了一份"。
  *
- * 想再加回一层之前，先想清楚这 10MB 换来的曲线差分是不是看得见。
+ * 让位距离是这里**唯一**能动的旋钮：首级半径必须是 0，镜面线两侧清晰度相等是接缝
+ * 不显形的唯一凭据，改成 6dp 就是一道清晰度断崖；层数也不必加（每层一次全屏离屏）。
+ * 收到 16dp 之后权重落在 8dp 处恰好 0.50，倒影从"贴着物体"到"化开"只用 16dp。
+ *
+ * ## 为什么是 4 个 stop（4 个绘制层）
+ *
+ * 每一级都是一次全屏离屏合成，半径 > 0 的那三层还要各自一次 `Modifier.blur`，
+ * 1080×2400 上每层约 5~10MB 缓冲。第 78 批曾收到 3 层（少了 `2dp` 与 `22dp`），
+ * 第 82 批因为起点归零必须把**清晰层也画出来**（见 [cascadeAlpha]），所以绘制层数
+ * 又回到 4 —— 但没有多出一次模糊，清晰层不挂 RenderEffect。
+ *
+ * 想再加一层之前，先想清楚这 10MB 换来的曲线差分是不是看得见。
  */
 internal val BlurRamp: List<BlurStop> = listOf(
-    BlurStop(radius = 0.dp, at = -128.dp),
-    BlurStop(radius = 5.dp, at = -44.dp),
-    BlurStop(radius = 12.dp, at = 0.dp),
-    BlurStop(radius = 34.dp, at = 240.dp),
+    BlurStop(radius = 0.dp, at = 0.dp),
+    BlurStop(radius = 12.dp, at = 16.dp),
+    BlurStop(radius = 24.dp, at = 64.dp),
+    BlurStop(radius = 34.dp, at = 160.dp),
 )
 
-/** 阶梯盖住封面的那一段高度（镜面线以上）。 */
-internal val CoverRamp: Dp = -BlurRamp.first().at
+/**
+ * 叠层向上**绘制溢出**的高度：**等于最大模糊半径（34dp）**。这不是过渡带。
+ *
+ * 第 82 批曾把它归零（用户要求取消封面侧那条模糊带），第 84 批恢复成 34dp 但
+ * **含义完全变了**：它不再是"阶梯盖住封面的那一段"，而是给四个离屏图层留的出血边。
+ * 阶梯的位置（[BlurRamp] 的 `at`）全部相对镜面线，溢出区里 `w₁..w₃ ≡ 0`，
+ * 半径 0 的清晰层在那里**什么都不画**（见 [RampLayerContent]）—— 所以封面一个像素
+ * 都不会糊，视觉上完全没有变化。
+ *
+ * 为什么非要出血（2026-10-27 真机）：
+ *
+ * 归零之后四个图层的顶边正好压在镜面线上。`graphicsLayer(Offscreen)` 与
+ * `Modifier.blur(Rectangle)` 在图层边缘会掉 alpha，而那条边一侧是封面、一侧是倒影，
+ * 缺口就成了一条横贯全宽的黑线 —— 873×1920 截图实测 y 957~962 亮度 1~4、两侧 90~105，
+ * 中心正落在镜面线（对称扫描 y=959）。同样是这张图，第 54~81 批的旧版截图在同一位置
+ * 是平滑过渡到背景，**没有这条线**，所以它就是"边缘落在镜面线"带来的。
+ *
+ * 之前溢出 128dp 时缺口落在封面上方，那里清晰层画的是封面自己的行（逐像素同源），
+ * 缺口露出来也是同样的像素，所以隐形。现在出血区留空，缺口露的是封面本体 —— 同样
+ * 隐形，而且不需要在封面上重叠任何东西。
+ *
+ * **出血量必须 ≥ 最大模糊半径**：否则 34dp 那一层的模糊核仍然跨过镜面线，
+ * 边缘衰减会落在可见区里。`ReflectionLayersTest` 守这条等式。
+ */
+internal val CoverRamp: Dp = BlurRamp.maxOf { it.radius }
 
 /**
- * 镜面线所在的那一级：它在镜面线处权重恰为 1。
+ * 镜面线所在的那一级：`index = 0`，半径 0（第 82 批）。
  *
- * 这一条是"接缝不可能出现"的全部理由 —— 镜面线两侧都被**同一个图层、同一次模糊、
- * 同一张位图的相邻两行**画出来，两侧的糊度与亮度按构造相等，不是靠参数凑出来的。
+ * 它是**阶梯里唯一的满权重层**，也是倒影的第一行。以前这一级是一层 12dp 的糊版，
+ * 现在它是清晰镜像 —— 因为糊度已经从镜面线处归零，往上再没有"过渡带"可分。
  */
 internal val SeamStopIndex: Int = BlurRamp.indexOfFirst { it.at == 0.dp }
+
+/**
+ * 叠层要画哪几级：**含清晰层**。
+ *
+ * 第 82 批的硬约束。清晰层的权重 `w_0` 在镜面线处是 1，不能像以前那样交给"封面本体"
+ * 承担 —— 封面在镜面线就结束了，倒影区里没人补这一份。缺了它，叠加 alpha 会掉到
+ * `1 − Π(1−w_i)`（级联 alpha 有恒等式 `Π(1−a_i) = w_0`）：镜下 8dp 处只剩 0.5、
+ * 16dp 处直接归零，色场透出一条背景色带（第 44 批那条老问题的翻版）。
+ * 门禁 `ReflectionLayersTest` 守这一条。
+ */
+internal val DrawnLayers: IntRange = 0..BlurRamp.lastIndex
 
 /**
  * 镜面线下方这段保持满 alpha —— 倒影"贴近物体处最实"。
@@ -110,7 +154,11 @@ internal val FadeHold: Dp = 24.dp
  *
  * 倒影是封面的镜像，内容必然重复，重复多少由**可见长度**决定。第 57 批曾把 150dp
  * 收到 104dp，以压掉"第二张封面"；2026-10-24 按用户指定放宽到 128dp，让镜下多出
- * 24dp 的封面末段，同时与 128dp 的过渡带等长，镜面上下各 128dp 形成对称。
+ * 24dp 的封面末段（那时镜上还有一条 128dp 的过渡带，两者等长）。
+ *
+ * 第 82 批过渡带归零之后，镜上不再有对称的那一半，128dp 全部落在镜面线以下 ——
+ * 起点是清晰的镜像，往下 16dp 内就糊开（见 [BlurRamp]，第 83 批从 32dp 收短），
+ * 所以"第二张封面"的可辨识度比第 57 批更低，不必再为此收短。
  *
  * 代价要明确：128dp 比 104dp 多翻下封面最后 24dp，构图里若有 logo/脸落在这一带，
  * 会比 104dp 更容易被认出来。真机若重新出现"封面两次"，旋钮仍是往回收
@@ -123,16 +171,21 @@ internal val FadeEnd: Dp = 128.dp
 /**
  * 纵向包络的采样点数：**按节点高度定，不是常数**。
  *
- * 包络是"权重 × 衰减"的乘积，写不进几个拐点 —— 只能采样成多段线性渐变。采样太稀
- * 会读出带状：阶梯里最窄的一段（0→4dp 那一级）只跨 42dp，采样步长一旦超过它的一半，
- * 线性化误差就会顶出 2%（≈5/255）的台阶。所以步长固定 4dp、上下封口。
+ * 包络是一条归一化曲线（级联 alpha），写不进几个拐点 —— 只能采样成多段线性渐变。
+ * 采样太稀会读出带状：阶梯里最窄的一段（0→16dp 那一级）只跨 16dp，采样步长一旦超过
+ * 它的一半，线性化误差就会顶出 2%（≈5/255）的台阶。所以步长固定 [MaskStepDp]、上下封口。
+ *
+ * [MaskStepDp] 是 2dp 而不是 4dp：第 83 批把最窄一段从 32dp 收到 16dp 之后，
+ * 同样的步长误差按平方翻倍 —— 4dp 下 13dp 处的复合不透明度只剩 0.9755（门限 0.98），
+ * `ReflectionLayersTest` 当场红。2dp 下最窄段有 8 段，误差回到 0.6% 量级。
+ * 代价只是每层渐变多一倍 stop（`remember` 缓存，只在高度变化时重建），不增加 GPU 层数。
  */
 internal fun maskSamplesFor(nodeHeight: Dp): Int =
     (nodeHeight.value / MaskStepDp).toInt().coerceIn(MaskMinSamples, MaskMaxSamples)
 
-private const val MaskStepDp = 4f
+private const val MaskStepDp = 2f
 private const val MaskMinSamples = 64
-private const val MaskMaxSamples = 200
+private const val MaskMaxSamples = 256
 
 /** 倒影最深处压暗多少 —— 保证白字可读，且从镜面线开始连续增长（不是台阶）。 */
 internal const val ScrimMax = 0.26f
@@ -158,11 +211,11 @@ private fun rise(stops: List<BlurStop>, index: Int, y: Dp): Float {
 }
 
 /**
- * 第 [index] 级在位置 [y] 的权重（`index = 0` 是清晰层，由封面本体承担）。
+ * 第 [index] 级在位置 [y] 的**权重**（不是 alpha，alpha 见 [cascadeAlpha]）。
  *
  * 这是**单位分解**：任意 [y] 上 `Σ index 0..last` 恒等于 1。这一条是整个方案的地基 ——
- * 只有它成立，镜面线两侧才永远是同一份内容、同一个亮度，不可能出现台阶；
- * 也只有它成立，过渡带里不会漏出底下的清晰封面（漏出来就是重影）。
+ * 只有它成立，倒影才是"半径连续变化的同一张图"，而不是两层互相淡入淡出的重影；
+ * 也只有它成立，级联 alpha 的分母最终归到 1，合成结果才是精确的加权平均。
  */
 internal fun layerWeight(index: Int, y: Dp, stops: List<BlurStop> = BlurRamp): Float {
     if (index < 0 || index > stops.lastIndex) return 0f
@@ -206,48 +259,97 @@ internal fun fadeAt(y: Dp, bottom: Dp, hold: Dp = FadeHold): Float {
 }
 
 /**
- * 第 [index] 级的纵向包络采样（每个采样点的 alpha，沿节点高度均匀分布）。
+ * 第 [index] 层的**叠加 alpha**（不是权重）。
  *
- * 节点 = 封面那 [CoverRamp] + 倒影 [bottom]，采样从节点顶端开始。
- * 采样点比拐点多，是为了让"权重 × 衰减"这条乘积曲线在分段线性下仍然平滑。
+ * 为什么不能直接拿权重当 alpha：Compose 是把一层层按 `over` 叠起来的，
+ * `n` 层各自 alpha = `w_i` 叠出来的结果既不是 `Σ w_i·L_i`，覆盖率也只有
+ * `1 − Π(1−w_i)`。以前这不是问题 —— 过渡带压在**不透明的封面**上，缺的那点 alpha
+ * 由封面自己补上。第 82 批把过渡带归零之后，倒影区下面什么都没有，缺多少就透多少
+ * 背景色。
+ *
+ * 正确做法是**归一化级联**：先画清晰层（alpha 1，整块倒影的不透明底），再逐层往上
+ * 叠，第 `i` 层的 alpha 取
+ *
+ * ```
+ * a_i = w_i / (w_0 + w_1 + … + w_i)
+ * ```
+ *
+ * 这样叠到第 `i` 层为止的合成结果恒等于 `Σ_{j≤i} w_j·L_j / Σ_{j≤i} w_j` —— 全部叠完
+ * 就是**精确的加权平均** `Σ w_j·L_j`（因为单位分解让分母为 1），且每一行都是完全不
+ * 透明的。清晰层权重为 0 的地方它自己让开（`a_0 = 0`，否则整段倒影都会被那层清晰的
+ * 镜像盖住）。
+ *
+ * 分母为 0 表示"这一层还没轮到"：返回 0，交给下面更糊的层去铺。
  */
-internal fun maskAlphas(
+internal fun cascadeAlpha(index: Int, y: Dp, stops: List<BlurStop> = BlurRamp): Float {
+    if (index < 0 || index > stops.lastIndex) return 0f
+    val weight = layerWeight(index, y, stops)
+    if (index == 0) return if (weight > 0f) 1f else 0f
+    var prefix = 0f
+    for (j in 0..index) prefix += layerWeight(j, y, stops)
+    if (prefix <= 1e-6f) return 0f
+    return (weight / prefix).coerceIn(0f, 1f)
+}
+
+/**
+ * 第 [index] 层纵向包络的采样（每个采样点的 alpha，沿**图层**高度均匀分布）。
+ *
+ * 采样区间是 `[−bleed, bottom]`，也就是 [CoverReflection] 真正画的那一块：
+ * 镜面线以上 [bleed]（= [CoverRamp]，出血，第 84 批）+ 倒影 [bottom]。
+ * **不能只按 `bottom` 采**：`toBlackBrush` 把数组首尾映射到图层的上下边，
+ * 少算出血那 34dp 就会让整条包络往下错 34dp —— 倒影整体被压扁，底部还空一截。
+ * 出血区里清晰层恒 1、模糊层恒 0，正是采样曲线开头那段平线。
+ *
+ * 这里**不含** [fadeAt]：衰减由整块倒影的父层一次性做（见 `CoverReflection`）。
+ * 逐层乘 fade 会把级联 alpha 压到 fade 以下 —— 镜面下方立刻暗一截。
+ */
+internal fun cascadeAlphas(
     index: Int,
     bottom: Dp,
     stops: List<BlurStop> = BlurRamp,
-    hold: Dp = FadeHold,
     samples: Int = 0,
+    bleed: Dp = CoverRamp,
 ): FloatArray {
-    val band = -stops.first().at
-    val node = band + bottom
+    val node = bleed + bottom
     val count = (if (samples > 0) samples else maskSamplesFor(node)).coerceAtLeast(2)
     val out = FloatArray(count)
     for (j in 0 until count) {
-        val y = Dp(node.value * j / (count - 1).toFloat()) - band
-        out[j] = (layerWeight(index, y, stops) * fadeAt(y, bottom, hold)).coerceIn(0f, 1f)
+        val y = Dp(node.value * j / (count - 1).toFloat()) - bleed
+        out[j] = cascadeAlpha(index, y, stops)
     }
     return out
 }
 
-/** 单层退化路径（没有 RenderEffect、或拿不到封面）用的包络：就是纯衰减。 */
+/**
+ * 整块倒影的衰减采样（每个采样点的 alpha，沿**节点**高度均匀分布）。
+ *
+ * 节点 = 出血 [bleed] + 倒影 [bottom]，与 [cascadeAlphas] 同一个区间 —— 这两条曲线
+ * 挂在**同一个** Box 上（`CoverReflection` 里那个 fade 父层），区间不一致就会错位：
+ * 2026-10-27 第 85 批实测，只按 `bottom` 采、Box 却只铺 `bottom` 高时，整块倒影被
+ * 下推 34dp，镜下留出一条 **34.0dp 的空白带**（std 22，正常倒影 60~80）。
+ *
+ * 出血区里 `fadeAt(y ≤ hold) = 1`，所以开头那段是平线，不会把出血区裁掉。
+ */
 internal fun fadeAlphas(
     bottom: Dp,
     hold: Dp = FadeHold,
     samples: Int = 0,
+    bleed: Dp = CoverRamp,
 ): FloatArray {
-    val count = (if (samples > 0) samples else maskSamplesFor(bottom)).coerceAtLeast(2)
+    val node = bleed + bottom
+    val count = (if (samples > 0) samples else maskSamplesFor(node)).coerceAtLeast(2)
     val out = FloatArray(count)
     for (j in 0 until count) {
-        val y = Dp(bottom.value * j / (count - 1).toFloat())
+        val y = Dp(node.value * j / (count - 1).toFloat()) - bleed
         out[j] = fadeAt(y, bottom, hold)
     }
     return out
 }
 
 /**
- * 能不能画成"阶梯"：要 RenderEffect（API 31+），也要封面本体（上半段画的是封面）。
+ * 能不能画成"阶梯"：要 RenderEffect（API 31+），也要封面位图（每一层都从它取行号）。
  *
- * 任一条不成立就退回单层倒影 —— 那时镜面线两侧的糊度会差一截，但至少画得出来。
+ * 任一条不成立就退回单层倒影 —— 那时镜面处的清晰度会断一截，但至少画得出来。
  * 降级可以，静默空白不行。
  */
 internal fun canRamp(cover: ImageBitmap?, sdkInt: Int): Boolean =
@@ -268,8 +370,8 @@ internal fun canRamp(cover: ImageBitmap?, sdkInt: Int): Boolean =
  * 这一条是 2026-10-23 第 59 批的根因：旧判据是 `mirror == null`，而 `mirror` 由一个
  * 异步解码 + 512² 翻转产出（当时 `reflectionCache` 的预算还小于单张位图，必然 miss；
  * API 31+ 现在根本不生产它，见 `ArtworkRepository.loadReflection`），
- * 切歌后要 10~30ms 才到 —— 这段时间整条带子（含压住封面末段 128dp 的过渡带）先是
- * 旧内容、再整体换掉，用户看到的就是"闪一下"。
+ * 切歌后要 10~30ms 才到 —— 这段时间整条倒影先是旧内容、再整体换掉，
+ * 用户看到的就是"闪一下"。
  */
 internal fun canDrawBand(hasCover: Boolean, hasMirror: Boolean, sdkInt: Int): Boolean =
     (hasCover && sdkInt >= Build.VERSION_CODES.S) || hasMirror
@@ -277,9 +379,9 @@ internal fun canDrawBand(hasCover: Boolean, hasMirror: Boolean, sdkInt: Int): Bo
 /**
  * 叠层**向 Column 报告**的排版高度：**恒为 0**。
  *
- * 这一条是硬约束，不是优化。叠层的绘制高度是 `CoverRamp + 倒影高`（约 557dp），
- * 而它挂在 Column 的镜面线上、下面紧跟 [com.milan.music.ui.player.PlayerTransport]。
- * 只要它报告真实高度，Column 就会把它当占位，把信息区与控制条整体推下去 ——
+ * 这一条是硬约束，不是优化。叠层的绘制高度是 `CoverRamp + 倒影高`，而它挂在 Column
+ * 的镜面线上、下面紧跟 [com.milan.music.ui.player.PlayerTransport]。只要它报告真实
+ * 高度，Column 就会把它当占位，把信息区与控制条整体推下去 ——
  * 2026-10-23 第 55 批真机：557dp 直接吃掉整屏，歌名、进度条、播放键全部出界，
  * 屏幕上只剩封面和倒影。
  */
@@ -287,6 +389,9 @@ internal val OverlayLayoutHeight: Dp = 0.dp
 
 /**
  * 叠层真正要画的纵向尺寸（从镜面线以上 [CoverRamp] 一直到页底）。
+ *
+ * 向上出血多少只由 [CoverRamp] 一处定义，**不要在这里手写 34dp** —— 它必须等于
+ * 最大模糊半径，跟着 [BlurRamp] 一起变。
  *
  * 与 [OverlayLayoutHeight] 的差值就是它"看得见但摸不着"的那一段 —— 这点很重要：
  * 布局高度为 0 并不代表不绘制，Compose 允许子元素画到自己的边界之外。
@@ -310,16 +415,14 @@ private fun Modifier.overlayOnly(drawHeight: Dp): Modifier =
     }
 
 /**
- * 倒影 + 跨缝过渡带，一个组件画完。
+ * 倒影，一个组件画完。
  *
  * **坐标系原点就是镜面线**：调用点必须把它放在封面框底（`CoverLayout.heroHeight`）上，
- * 组件自己向上溢出 [CoverRamp] 盖住封面末段、向下铺满整页。之所以要溢出到封面上，
- * 是因为过渡带里"封面那半段"必须画在**清晰封面之上**才看得见（第 51 批：画在下面
- * 被封面整个盖掉，真机就是"带子里 121px 一点没糊"）。
+ * 组件向下铺满整页。它会向上多画 [CoverRamp]（= 最大模糊半径）**但那里不画内容** ——
+ * 纯粹是给图层边缘留的出血，封面从顶到底仍然是自己的本体，一个字都不糊。
  *
- * 画在 Column 里（封面之后、控件之前）是这个组件唯一的工作位置：
- * 上面压住封面末段，下面被歌曲信息与控制压住 —— 文字永远在最上层，不会像上一版
- * 那样被 0.9 alpha 的倒影盖成一片洗白。
+ * 画在 Column 里（封面之后、控件之前）是这个组件唯一的工作位置：倒影被歌曲信息与
+ * 控制压住 —— 文字永远在最上层，不会像上一版那样被 0.9 alpha 的倒影盖成一片洗白。
  *
  * [heroHeight] 是封面框高：镜面线以下的每一行都由 [coverRowAt] 从**封面框**取行号，
  * 所以倒影与封面共用同一套取景，接缝两侧是同一张位图的相邻两行。
@@ -360,7 +463,9 @@ internal fun CoverReflection(
             .offset(y = -band),
     ) {
         if (!ramp || cover == null) {
-            val alphas = remember(height) { fadeAlphas(height) }
+            // 降级路径不画出血（图层就是倒影本身），所以采样必须显式 `bleed = 0.dp`：
+            // 默认值是 [CoverRamp]，照用会让包络整体上错 34dp、底部提前淡完。
+            val alphas = remember(height) { fadeAlphas(height, bleed = 0.dp) }
             val brush = remember(alphas) { alphas.toBlackBrush() }
             // 降级路径由 [canDrawBand] 保证 `mirror` 非空。
             val degraded = mirror ?: return@Box
@@ -377,38 +482,70 @@ internal fun CoverReflection(
             return@Box
         }
 
-        // 由远到近：最糊的先画。近处那几级的包络在镜面线附近才满值，后画才盖得住。
+        // 倒影本体：先按级联 alpha 叠成**精确的加权平均**（见 [cascadeAlpha]），
+        // 再由这一层父级一次性按 [fadeAt] 淡出。
         //
-        // 循环里调 `remember` **合法但脆**：`remember` 认的是 slot table 里的位置，
-        // 也就是"第几次被调用"，不是源码里的变量名。这里成立靠两个前提，改任何一条
-        // 都要重新查一遍：
-        //  1. [BlurRamp] 是顶层 `val`，长度恒为 4 —— 循环上界不依赖运行时状态，
-        //     所以每一趟组合走的迭代序列完全相同，slot 不会错位；
-        //  2. `index` 与 `height` 都进了 key —— 高度变化（旋转、分屏）时包络重算，
-        //     不会把旧高度下算好的 alpha 拿去用。
-        // 反例：把 `BlurRamp` 改成由参数传入、或长度随屏幕变化的 list，第 n 层的
-        // mask 会被第 n+1 层复用，阶梯直接串色 —— 而且只在部分设备上出现。
-        for (index in BlurRamp.lastIndex downTo 1) {
-            val stop = BlurRamp[index]
-            val alphas = remember(index, height) { maskAlphas(index, height) }
-            val brush = remember(alphas) { alphas.toBlackBrush() }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(nodeHeight)
-                    // 包络在**模糊外面**：`Modifier.blur` 若在外，包络的 alpha 会被
-                    // 模糊一起稀释，镜面处从 1.0 掉到 0.7，更暗的底层透出来 ——
-                    // 2026-10-23 真机量到 y=960 整行 242 列同时暗 11/255（4.3%）。
-                    .rampMask(brush)
-                    .blur(radius = stop.radius, edgeTreatment = BlurredEdgeTreatment.Rectangle),
-            ) {
-                RampLayerContent(
-                    cover = cover,
-                    band = band,
-                    heroHeight = heroHeight,
-                    height = height,
-                    contentScale = contentScale,
-                )
+        // fade 必须在父级，不能在每层的 mask 里乘：级联 alpha 的分母是权重之和，
+        // 乘上 fade 之后叠加结果会掉到 fade 以下 —— 镜面下方立刻暗一截，而且越往下
+        // 越暗。父级 DstIn 只作用一次，等比压整块倒影。
+        val fade = remember(height, band) { fadeAlphas(height, bleed = band) }
+        val fadeBrush = remember(fade) { fade.toBlackBrush() }
+        // fade 父层必须覆盖**整个节点**（出血 + 倒影），且原点与外层一致（镜面线以上 band）。
+        //
+        // 顶边一旦贴到镜面线（`.offset(y = band).height(height)`），子图层就会被 DstIn
+        // 的矩形裁在镜面线以下 —— 而图层的翻折轴在自身 y = band 处，于是整块倒影
+        // 被下推 band。2026-10-27 第 85 批真机就是这么在镜下留出一条 **34.0dp 空白带**
+        // （实测 std 22，正常倒影 60~80，宽度正好等于 [CoverRamp]）。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(nodeHeight)
+                .rampMask(fadeBrush),
+        ) {
+            // 由清晰到糊：**清晰层先画**，它是整块倒影的不透明底（见 [DrawnLayers]）。
+            //
+            // 循环里调 `remember` **合法但脆**：`remember` 认的是 slot table 里的位置，
+            // 也就是"第几次被调用"，不是源码里的变量名。这里成立靠两个前提，改任何一条
+            // 都要重新查一遍：
+            //  1. [BlurRamp] 是顶层 `val`，长度恒为 4 —— 循环上界不依赖运行时状态，
+            //     所以每一趟组合走的迭代序列完全相同，slot 不会错位；
+            //  2. `index` 与 `height` 都进了 key —— 高度变化（旋转、分屏）时包络重算，
+            //     不会把旧高度下算好的 alpha 拿去用。
+            // 反例：把 `BlurRamp` 改成由参数传入、或长度随屏幕变化的 list，第 n 层的
+            // mask 会被第 n+1 层复用，阶梯直接串色 —— 而且只在部分设备上出现。
+            for (index in DrawnLayers) {
+                val stop = BlurRamp[index]
+                val alphas = remember(index, height) { cascadeAlphas(index, height) }
+                val brush = remember(alphas) { alphas.toBlackBrush() }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(nodeHeight)
+                        // 包络在**模糊外面**：`Modifier.blur` 若在外，包络的 alpha 会被
+                        // 模糊一起稀释，镜面处从 1.0 掉到 0.7，更暗的底层透出来 ——
+                        // 2026-10-23 真机量到 y=960 整行 242 列同时暗 11/255（4.3%）。
+                        .rampMask(brush)
+                        .then(
+                            // 清晰层（半径 0）不挂 RenderEffect：`blur(0.dp)` 只会白开
+                            // 一层离屏缓冲，边缘还可能被 `Rectangle` 裁掉半个像素。
+                            if (stop.radius > 0.dp) {
+                                Modifier.blur(
+                                    radius = stop.radius,
+                                    edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                                )
+                            } else {
+                                Modifier
+                            },
+                        ),
+                ) {
+                    RampLayerContent(
+                        cover = cover,
+                        band = band,
+                        heroHeight = heroHeight,
+                        height = height,
+                        contentScale = contentScale,
+                    )
+                }
             }
         }
 
@@ -463,7 +600,7 @@ internal fun coverRowAt(nodeY: Float, band: Float, heroHeight: Float): Float =
     else heroHeight - (nodeY - band)
 
 /**
- * 一层阶梯的内容：上半是封面的最后 [band]（底边贴镜面线），下半是倒影。
+ * 一层阶梯的内容：镜面线以上 [band] 留空，以下画镜像。
  *
  * **用画布按像素画，不用 `Image`。** 上一版把定位交给 `Image` 的 `contentScale` +
  * `BottomCenter`：那条路径的正确性依赖"缩放后的位图高度恰好等于节点高度"，源图一竖
@@ -471,9 +608,17 @@ internal fun coverRowAt(nodeY: Float, band: Float, heroHeight: Float): Float =
  * 2026-10-23 真机就是这么"封面出现两次"的：过渡带里出现倒着的面具、倒着的 SWING 和
  * 倒着的脸，而原图对应那几行只是衬衫和背景。
  *
- * 现在两半都从 [coverRowAt] 取行号：[band] 处取到 [heroHeight]（封面最底一行），
- * 往下严格逐行退回。翻折用 `translate(0, 2·band) · scale(1, -1)` 绕镜面线做，
- * 不经过任何 layout 节点 —— 偏移量为 0，没有可以"滑掉"的自由度。
+ * 现在只画镜像：[band] 处取到 [heroHeight]（封面最底一行），往下严格逐行退回。
+ * 翻折用 `translate(0, 2·band) · scale(1, -1)` 绕镜面线做，不经过任何 layout 节点 ——
+ * 偏移量为 0，没有可以"滑掉"的自由度。
+ *
+ * 第 82 批把 [band] 归零（封面侧不留模糊），第 84 批把 [band] 变成纯出血 ——
+ * 那时上半段本来是"把封面的最后 band 行原样画一遍"，现在**不画了**：
+ *
+ *  · 出血区必须存在（否则图层边缘落在镜面线上，见 [CoverRamp]）；
+ *  · 但它不需要内容 —— 那里露出来的是封面本体，本来就长这样；
+ *  · 而"再画一遍"要依赖 `Canvas.drawImage` 与 `Image`+`ContentScale` 两套取景
+ *    逐像素重合，半像素偏差就是一层淡重影。留着出血、不填内容，风险为零。
  */
 @Composable
 private fun RampLayerContent(
@@ -495,15 +640,10 @@ private fun RampLayerContent(
         )
         val fit = coverFit(factor.scaleX, factor.scaleY, cover.width, cover.height, size.width)
 
-        // 镜面线以上：封面的最后 band 行，原样（不翻折）。
-        drawCoverRows(
-            cover = cover,
-            fit = fit,
-            frameTop = heroPx - bandPx,
-            frameRows = bandPx,
-            dstTop = 0f,
-            dstHeight = bandPx,
-        )
+        // 镜面线以上那 [band] 是**留空**的出血区（见 [CoverRamp]）：不画任何东西，
+        // 只是为了把图层的上边缘挪到封面里看不见的地方。画反而有害 —— 那会在封面上
+        // 叠一层"同一张图的第二次绘制"，半像素差异就会读成重影。
+        //
         // 镜面线以下：绕 y = bandPx 翻折。先画到 [band-mirrorPx, band]，翻折后正好落到
         // [band, band+mirrorPx]，且行序反转 —— 这就是镜像。
         //

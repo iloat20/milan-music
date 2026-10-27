@@ -16,7 +16,7 @@ val keystoreProps: Provider<Properties> = providers.fileContents(
 }
 
 /** 唯一版本号来源；版本名由它派生（见 `defaultConfig`）。 */
-val appVersionCode = 80
+val appVersionCode = 85
 
 plugins {
     alias(libs.plugins.android.application)
@@ -98,7 +98,26 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // 依赖会把各自的 LICENSE.txt 摊进 META-INF，本工程命中的是 8 份逐字节相同的
+            // Apache-2.0 文本（lifecycle-common ×3、collection ×2、datastore ×2、annotation ×1），
+            // 压缩后合计 29,244 B。同一份文本重复 8 遍不构成"附许可证"，也不再提供任何信息；
+            // 只在二进制里去掉，仓库侧与依赖声明不变。
+            excludes += "/META-INF/**/LICENSE.txt"
         }
+    }
+
+    // 体积（第 81 批）：AndroidX 只为 85 个 locale 出串，而本应用只有中文界面。
+    // arsc 从 248,272 B 降到 33,184 B，dex 与其余条目逐字节不变。
+    //
+    // 这里必须是**准确 qualifier**。包内只有 zh-rCN / zh-rHK / zh-rTW 与 en-rCA/GB/XC/IN/AU，
+    // 没有裸 values-zh、values-en：写 "zh"/"en" 会静默匹配到 0 个 locale，中文串全没了
+    // （`apkanalyzer resources configs --type string` 只剩 default），而构建、体积、门禁
+    // 全都正常。被保住的 34 条中文串里有 media3_controls_play/pause_description、
+    // seek_to_next/previous、selected/not_selected、state_on/off —— TalkBack 的播报文案。
+    //
+    // 只裁 values-* 语言配置：density 与 night 的 drawable 配置实测一个没少。
+    androidResources {
+        localeFilters += listOf("zh-rCN", "zh-rHK", "zh-rTW")
     }
 
     lint {
