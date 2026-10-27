@@ -19,6 +19,35 @@ import java.util.Locale
  */
 class FormatDurationTest {
 
+    /**
+     * 位置标签与时长标签**对 0 的解释不同**：时长 0 = 还不知道（`--:--`），
+     * 位置 0 = 就是开头（`0:00`）。
+     *
+     * 两者曾共用一个函数，于是左端标签在每曲开头、拖到最左、在 0 处暂停时都显示
+     * `--:--`，被读成"这首歌没有进度"。这一条把两种语义钉开。
+     */
+    @Test
+    fun `a zero position is a place, not a missing value`() {
+        assertEquals("0:00", formatPosition(0L))
+        assertEquals("3:45", formatPosition(225_000L))
+        assertEquals("1:02:03", formatPosition(3_723_000L))
+    }
+
+    /** 位置是 `Long`，会话报出负数时只能夹到 0，不能回退成占位符。 */
+    @Test
+    fun `negative positions clamp to the start`() {
+        assertEquals("0:00", formatPosition(-1L))
+        assertEquals("0:00", formatPosition(-5_000L))
+    }
+
+    /** 同一个值在两个入口下必须产出同一段时钟文本（只差 0 的语义）。 */
+    @Test
+    fun `position and duration share one clock format above zero`() {
+        listOf(1_000L, 45_000L, 225_000L, 3_599_000L, 3_600_000L, 45_296_000L).forEach { ms ->
+            assertEquals(formatDuration(ms), formatPosition(ms))
+        }
+    }
+
     @Test
     fun `missing durations read as placeholders`() {
         assertEquals("--:--", formatDuration(0L))

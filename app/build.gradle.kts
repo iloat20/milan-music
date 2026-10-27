@@ -16,10 +16,11 @@ val keystoreProps: Provider<Properties> = providers.fileContents(
 }
 
 /** 唯一版本号来源；版本名由它派生（见 `defaultConfig`）。 */
-val appVersionCode = 85
+val appVersionCode = 86
 
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.androidx.baselineprofile)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
 }
@@ -149,6 +150,27 @@ composeCompiler {
     metricsDestination = layout.buildDirectory.dir("compose_compiler")
 }
 
+/**
+ * 应用级 baseline profile（第 86 批）。
+ *
+ * 包里的 `assets/dexopt/baseline.prof` 在此之前全部来自依赖 —— Compose、media3、
+ * datastore 各带一份，合并后只覆盖它们自己的类。我们自己的启动路径（`MilanMusicApp`
+ * → `MainActivity` → 曲库恢复 → 首页首帧）没有一条规则，冷启动那段只能现场 JIT。
+ *
+ * 采集端是 `:baselineprofile`（`com.android.test` 模块），跑：
+ *   ./gradlew :app:generateReleaseBaselineProfile
+ * 结果写回 `app/src/release/generated/baselineProfiles/`，随下一次 `assembleRelease` 进包。
+ * 需要连一台真机（或能跑的模拟器）；没有设备时命令会直接失败，不会产出一个空 profile。
+ */
+baselineProfile {
+    // 采集结果进源码目录而不是只在 build/：一次性采集、长期复用，否则每次发布都要重采。
+    saveInSrc = true
+    // 构建时不自动采集。采一次要连设备跑完冷启动循环，把它挂在 assembleRelease 上会让
+    // 每个没有设备的构建（CI、换机器）直接失败。采集是显式动作：
+    //   ./gradlew :app:generateReleaseBaselineProfile
+    automaticGenerationDuringBuild = false
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -179,4 +201,8 @@ dependencies {
     // 只为 MemoCache 的并发时序：合并同 key 请求、以及"生产者被取消后等待方重读缓存"
     // 这两条只有在能控制调度器时才能可靠复现。不是 mock 框架，也不进生产包。
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // 采集端模块；`baselineProfile` 配置由 androidx.baselineprofile 插件创建。
+    // 它在 release 变体里只参与 generateBaselineProfile 任务，不产生运行时依赖。
+    baselineProfile(project(":baselineprofile"))
 }

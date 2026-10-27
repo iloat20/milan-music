@@ -91,6 +91,7 @@ import com.milan.music.ui.text.artistText
 import com.milan.music.ui.text.titleText
 import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.formatDuration
+import com.milan.music.ui.util.formatPosition
 import com.milan.music.ui.util.noRippleClickable
 import com.milan.music.ui.util.rememberDragOffset
 import kotlinx.coroutines.CancellationException
@@ -860,7 +861,7 @@ private fun AppleMusicProgress(
     // 必须在组合里先取出：`semantics { }` 是普通 lambda，里面调不到 `stringResource`。
     val progressDescription = stringResource(
         R.string.progress_state_description,
-        formatDuration(displayPosition),
+        formatPosition(displayPosition),
         formatDuration(durationMs),
     )
 
@@ -974,7 +975,7 @@ private fun AppleMusicProgress(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = formatDuration(displayPosition),
+                text = formatPosition(displayPosition),
                 style = MaterialTheme.typography.labelSmall,
                 color = OnDarkMuted,
             )

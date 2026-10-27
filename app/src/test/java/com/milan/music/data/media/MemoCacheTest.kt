@@ -104,8 +104,16 @@ class MemoCacheTest {
         assertEquals("written-before-cancel", waiter.await())
     }
 
+    /**
+     * 生产者被取消、且取消前什么都没写进缓存时，等待方**必须接手生产**。
+     *
+     * 这一条钉的是一个真实的可见缺陷：列表里 A 行先请求某张封面，A 行滚出屏幕时它的
+     * `LaunchedEffect` 被取消，而同一张封面正在等待的 B 行仍然可见。如果那个 `null`
+     * 被当成"这张专辑没有封面"交出去，B 行就会停在占位图上 —— 它的 key 没变，
+     * 不会重试，直到滚出去再滚回来。
+     */
     @Test
-    fun `a cancelled producer with nothing cached reports no value`() = runTest {
+    fun `a cancelled producer leaves the waiter to take over`() = runTest {
         val memo = MemoCache<Long, String>(peek = { null })
         val producerStarted = CompletableDeferred<Unit>()
         val hold = CompletableDeferred<Unit>()
@@ -119,15 +127,39 @@ class MemoCacheTest {
         }
         producerStarted.await()
 
+        var takeovers = 0
         val waiter = async {
-            memo.load(2L) { error("等待方不该成为第二个生产者") }
+            memo.load(2L) { takeovers++; "taken-over" }
         }
         runCurrent()
 
         producer.cancel()
         producer.join()
 
-        assertNull(waiter.await())
+        assertEquals("taken-over", waiter.await())
+        assertEquals("接手只该发生一次", 1, takeovers)
+    }
+
+    /**
+     * 生产者自己返回 `null` 是**结论**，等待方必须直接接受，不许再解一次 ——
+     * 否则每张没有封面的专辑都要付两次 `ContentResolver` 往返。
+     */
+    @Test
+    fun `a producer that reports nothing is taken as the answer`() = runTest {
+        val memo = MemoCache<Long, String>(peek = { null })
+        val gate = CompletableDeferred<Unit>()
+        var decodes = 0
+
+        val producer = async { memo.load(4L) { decodes++; gate.await(); null } }
+        runCurrent()
+        val waiter = async { memo.load(4L) { decodes++; "second" } }
+        runCurrent()
+
+        gate.complete(Unit)
+
+        assertNull(producer.await())
+        assertNull("结论是「没有值」，不是「再试一次」", waiter.await())
+        assertEquals("结论路径只该解一次", 1, decodes)
     }
 
     /**

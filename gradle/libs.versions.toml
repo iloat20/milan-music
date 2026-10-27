@@ -6,7 +6,7 @@ lifecycle = "2.11.0"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
 media3 = "1.11.1"
-datastore = "1.2.1"
+datastore = "1.3.0"
 serialization = "1.12.0"
 haze = "2.0.1"
 junit = "4.13.2"
@@ -15,6 +15,15 @@ junit = "4.13.2"
 # 声明的版本，钉在 1.9.0 就多出一条与代码无关的 warning。MemoCache 只用 CompletableDeferred，
 # 两版语义一致，跑在哪个上面都不影响结论。
 coroutines = "1.11.0"
+# 应用级 baseline profile：采集端 macrobenchmark 的 rule 与 Gradle 插件由
+# androidx.benchmark 同一版本一起发布，版本必须一致，所以共用一个 ref。
+# 只在 :baselineprofile 的测试 APK 与构建脚本里出现，不进发布包。
+benchmark = "1.5.0"
+# 采集用的 instrument 测试栈，只有 :baselineprofile 用。取与 benchmark 1.5.0
+# 同时期的稳定版，避免 lint 的 NewerVersionAvailable 对着显式声明逐条比对又冒 warning。
+androidxTestJunit = "1.3.0"
+espresso = "3.7.0"
+uiautomator = "2.4.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -38,8 +47,16 @@ haze = { group = "dev.chrisbanes.haze", name = "haze", version.ref = "haze" }
 haze-glass = { group = "dev.chrisbanes.haze", name = "haze-glass", version.ref = "haze" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmark" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
+androidx-test-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
+androidx-test-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+# :baselineprofile 是一个不产出应用的 test-only 模块，靠它才能 instrument 目标 app。
+android-test = { id = "com.android.test", version.ref = "agp" }
+# 把采集结果合并进 app 的 release 产物（assets/dexopt/baseline.prof）。
+androidx-baselineprofile = { id = "androidx.baselineprofile", version.ref = "benchmark" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
