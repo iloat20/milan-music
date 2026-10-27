@@ -23,6 +23,7 @@ import com.milan.music.MilanMusicApp
 import com.milan.music.R
 import com.milan.music.data.media.softwareCopy
 import com.milan.music.data.model.Track
+import com.milan.music.play.toTrack
 import com.milan.music.ui.text.titleText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -116,8 +117,26 @@ class MusicWidgetProvider : AppWidgetProvider() {
         widgetId: Int,
     ) {
         val app = context.applicationContext as? MilanMusicApp ?: return
-        val state = app.container.player.state.value
-        val track = state.currentTrack
+        val live = app.container.player.state.value
+        // The session is deliberately not bound at process start (see MilanMusicApp):
+        // the library screen owns the connect. The launcher's own `onUpdate` after a
+        // reboot or a low-memory kill therefore ran with an empty state and drew the
+        // bare app name over a play icon, even though a queue was waiting in the
+        // snapshot to be resumed. Read it only in that case — this is a file read.
+        val snapshot = if (live.currentTrack == null) {
+            runCatching { app.container.playbackSnapshot.load() }
+                .onFailure { Log.w(TAG, "snapshot fallback unreadable", it) }
+                .getOrNull()
+        } else {
+            null
+        }
+        val display = resolveWidgetDisplay(
+            hasLiveTrack = live.currentTrack != null,
+            livePlaying = live.isPlaying,
+            snapshotAvailable = snapshot?.current != null,
+            snapshotWasPlaying = snapshot?.wasPlaying == true,
+        )
+        val track = live.currentTrack ?: snapshot?.current?.toTrack()
 
         val views = RemoteViews(context.packageName, R.layout.widget_music)
 
@@ -131,14 +150,17 @@ class MusicWidgetProvider : AppWidgetProvider() {
 
         views.setImageViewResource(
             R.id.widget_play,
-            if (state.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play,
+            if (display.isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play,
         )
 
         views.setOnClickPendingIntent(R.id.widget_root, openAppIntent(context))
-        // Cold start belongs to the visible activity: see [widgetPlayAction].
+        // The transport intent reads the **live** queue, never the snapshot: a snapshot
+        // is not a bound session, so a TOGGLE broadcast in a process without one would
+        // bind a fresh, empty queue and do nothing. Cold start belongs to the visible
+        // activity — see [widgetPlayAction].
         views.setOnClickPendingIntent(
             R.id.widget_play,
-            when (widgetPlayAction(state.hasQueue)) {
+            when (widgetPlayAction(live.hasQueue)) {
                 WidgetPlayAction.TOGGLE -> toggleIntent(context)
                 WidgetPlayAction.OPEN_APP_AND_PLAY -> openAppIntent(context, playOnStart = true)
             },
