@@ -79,7 +79,6 @@ class PlayerController(
     private var controller: MediaController? = null
     private var connection: ListenableFuture<MediaController>? = null
     private var progressJob: Job? = null
-    private var queue: List<Track> = emptyList()
 
     /**
      * Requests that arrived before the controller finished connecting, in arrival
@@ -282,7 +281,6 @@ class PlayerController(
         pendingActions.clear()
         controller = null
         connection = null
-        queue = emptyList()
         lastWidgetSnapshot = null
         _state.value = PlayerUiState()
         _progress.value = PlaybackProgress()
@@ -373,7 +371,6 @@ class PlayerController(
             return
         }
         val index = startIndex.coerceIn(0, tracks.lastIndex)
-        queue = tracks
         // Written before the queue reaches the session: onAddMediaItems resolves
         // against this map, and setMediaItems is asynchronous, so a later write can
         // race an earlier resolution.
@@ -519,9 +516,9 @@ class PlayerController(
     private fun publishState(mediaController: MediaController) {
         val mediaItem = mediaController.currentMediaItem
         // Shuffle reorders the playback sequence, so `currentMediaItemIndex` is a
-        // position in the shuffled order — not an index into `queue`. The only
-        // correct lookup is by mediaId; the index fallback fires only before any
-        // media item has been set.
+        // position in the shuffled order — it is **not** an index into the list that
+        // was handed to `setMediaItems`. The only correct lookup is by mediaId.
+        //
         // Playback can start without this controller: a library browser sends its own
         // items, and the system can resume a queue after process death. In both cases
         // the index has no entry, so fall back to the item's own metadata and seed the
@@ -531,8 +528,14 @@ class PlayerController(
             trackIndex.get(item.mediaId)
                 ?: item.toFallbackTrack()?.also(trackIndex::put)
 
+        // No index fallback. There used to be `?: queue[currentMediaItemIndex]`, which
+        // is wrong twice over: under shuffle that index addresses a different track,
+        // and it also fires when there is no current item at all (between
+        // `setMediaItems` and the session materialising it), where the index means
+        // nothing and the queue's first entry is not necessarily the one starting.
+        // Both cases showed a *different* song than the one playing. When nothing
+        // resolves, the update below keeps the previous track — stale, but never wrong.
         val currentTrack = mediaItem?.let { resolve(it) }
-            ?: queue.getOrNull(mediaController.currentMediaItemIndex)
 
         // The player's own indices, not queue[current ± 1]: shuffle reorders the
         // timeline, and REPEAT_MODE_ALL is pinned on, so the neighbours wrap around

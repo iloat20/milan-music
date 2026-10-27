@@ -835,6 +835,13 @@ private fun AppleMusicProgress(
 
     val displayPosition = if (dragging) (dragRatio * durationMs).toLong() else positionMs
 
+    // 必须在组合里先取出：`semantics { }` 是普通 lambda，里面调不到 `stringResource`。
+    val progressDescription = stringResource(
+        R.string.progress_state_description,
+        formatDuration(displayPosition),
+        formatDuration(durationMs),
+    )
+
     Column {
         Canvas(
             modifier = Modifier
@@ -876,8 +883,7 @@ private fun AppleMusicProgress(
                 // accessibility scroll gestures seek instead of scrolling the sheet.
                 .semantics {
                     progressBarRangeInfo = ProgressBarRangeInfo(shownRatio, 0f..1f)
-                    stateDescription =
-                        "${formatDuration(displayPosition)} / ${formatDuration(durationMs)}"
+                    stateDescription = progressDescription
                     if (durationMs > 0L) {
                         setProgress { target ->
                             onSeek((target.coerceIn(0f, 1f) * durationMs).toLong())

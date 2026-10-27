@@ -82,6 +82,13 @@ class ArtworkBitmapLoader(private val context: Context) : BitmapLoader {
         cache.get(uri)?.let { return Futures.immediateFuture(it) }
         return executor.submit(
             Callable {
+                // The check above runs on the caller's thread. A track change refreshes
+                // the notification *and* the lock screen, so two requests for the same
+                // URI arrive back to back, both miss, and both queue a decode. The
+                // executor is single-threaded: by the time the second task runs the
+                // first has already filled the cache, so re-checking here turns that
+                // second decode (~10 ms and a ~1 MB allocation) into a map hit.
+                cache.get(uri)?.let { return@Callable it }
                 val bitmap = resolve(uri) ?: throw IOException("No embedded artwork for $uri")
                 cache.put(uri, bitmap)
                 bitmap

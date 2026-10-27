@@ -28,6 +28,10 @@
     <string name="cd_clear_search">清除</string>
     <string name="cd_sort">排序</string>
 
+    <!-- 进度条的无障碍描述："已播放 / 总时长"。分隔符不能写死在代码里：
+         有的语言用别的间隔符，且这一行是 TalkBack 逐字读出来的。 -->
+    <string name="progress_state_description">%1$s / %2$s</string>
+
     <!-- 曲库状态 -->
     <string name="library_scanning_title">正在扫描音乐库</string>
     <string name="library_scanning_body">首次启动需要读取设备上的音频文件，请稍候。</string>

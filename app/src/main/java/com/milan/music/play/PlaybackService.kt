@@ -609,9 +609,20 @@ class PlaybackService : MediaLibraryService() {
         Log.w(TAG, "snapshot $label write failed; playback continues", failure)
     }
 
-    /** Every fifteen seconds while playback advances; see [persistPosition]. */
+    /**
+     * Ticks the position every fifteen seconds **while playback advances**.
+     *
+     * 早先是 `onCreate` 里无条件启动、循环里再 `if (player.isPlaying)` 判断。那样即使
+     * 一直暂停着、服务只是被系统留着，也每十五秒唤醒一次主线程去问一个已知为 false 的
+     * 状态。现在由 [Player.Listener.onIsPlayingChanged] 启停：不播就没有这个循环，
+     * "暂停期间不写快照"也不再依赖循环体内的判断。
+     *
+     * 幂等：`isPlaying` 可能连续报两次 true（例如切歌时缓冲），重复启动会留下两个循环，
+     * 于是写入频率翻倍，而 `snapshotWriteLock` 只会让它们排队而不是互相抵消。
+     */
     private fun startSnapshotTicker() {
         if (snapshotStore == null) return
+        if (positionJob?.isActive == true) return
         positionJob = serviceScope.launch {
             while (isActive) {
                 delay(SNAPSHOT_INTERVAL_MS)
@@ -619,6 +630,11 @@ class PlaybackService : MediaLibraryService() {
                 if (player.isPlaying) persistPosition(player)
             }
         }
+    }
+
+    private fun stopSnapshotTicker() {
+        positionJob?.cancel()
+        positionJob = null
     }
 
     /**
@@ -900,6 +916,9 @@ class PlaybackService : MediaLibraryService() {
                     // reconcile: from here on the first track is audible and its buffer
                     // must not be made to compete with a cursor walk.
                     container?.playbackStartGate?.markAudible()
+                    startSnapshotTicker()
+                } else {
+                    stopSnapshotTicker()
                 }
                 serviceScope.launch { persistPosition(player) }
             }
@@ -951,7 +970,9 @@ class PlaybackService : MediaLibraryService() {
             .setBitmapLoader(loader)
             .build()
 
-        startSnapshotTicker()
+        // 只有已经在播时才启动：暂停着创建服务不该凭空开一个每十五秒醒一次的循环。
+        // 之后由 `onIsPlayingChanged` 启停。
+        if (player.isPlaying) startSnapshotTicker()
         replayGainReader = ReplayGainReader(this)
     }
 
@@ -1111,8 +1132,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
-        positionJob?.cancel()
-        positionJob = null
+        stopSnapshotTicker()
         serviceScope.cancel()
         mediaSession?.let { session ->
             session.player.release()

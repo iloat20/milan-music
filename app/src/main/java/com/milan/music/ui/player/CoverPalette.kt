@@ -108,12 +108,12 @@ internal fun paletteOf(pixels: IntArray, width: Int, height: Int): PlayerPalette
 
     // 色场就是封面底部那一条本身。之前这里会压到亮度 0.13、再把彩度放大一倍，
     // 结果薰衣草白的封面被压成一块深紫 —— 怎么解释都不像"从封面取的"。
-    val bottom = shade(bottomSample, 0f, FIELD_MAX_LUMINANCE)
+    val bottom = shade(bottomSample, FIELD_MAX_LUMINANCE)
 
     // 顶部仍比色场暗一档，"上下不一样"才成立；但只在它比色场还亮时才压，所以浅色
     // 封面的顶部依然是一条浅色带，而不是以前那条与画面无关的暗带。
     val ceiling = min(luminanceOf(bottom) * TOP_VS_FIELD, TOP_MAX_LUMINANCE)
-    val top = shade(topSample, 0f, ceiling)
+    val top = shade(topSample, ceiling)
 
     return PlayerPalette(top = top, bottom = bottom)
 }
@@ -319,21 +319,19 @@ internal fun darken(color: Color, factor: Float): Color {
  * 默认行为是"原样返回"—— 只有超过上限才动手。动手时在**线性**空间里对三个通道乘同
  * 一个系数：色相与饱和度比例完全不变，只是整体变暗，不会像在 sRGB 里乘系数那样把
  * 暗部压脏。
+ *
+ * **这里没有"纯黑给中性色"的分支，也不该有**：上一行已经是"不超过上限就原样返回"，
+ * 而纯黑的亮度是 0、上限不可能小于 0，所以那个分支永远走不到。原先它存在时，注释
+ * 承诺的"纯黑给中性色"是假的 —— 真正的兜底在上游：[bandColorOf] 对纯黑封面返回
+ * `null`，[paletteOf] 于是退回 [FallbackPalette]，压根不会拿纯黑来 [shade]。
+ *
+ * 接近纯黑但不等于黑的颜色同样安全：`factor = 上限 / 亮度` 会大于 1，被 [darken]
+ * 钳到 1，结果还是原色，不会被放大成一块彩色噪声。
  */
-private fun shade(color: Color, minLuminance: Float, maxLuminance: Float): Color {
+internal fun shade(color: Color, maxLuminance: Float): Color {
     val luminance = luminanceOf(color)
-    val ceiling = max(minLuminance, maxLuminance)
-    if (luminance <= ceiling) return color
-
-    // 纯黑没有任何色相可以恢复：直接给区间中点的中性色，比放大一个接近 0 的
-    // 亮度更可预期（那样会把量化噪声放大成一块彩色）。
-    if (luminance < 1e-5f) {
-        val neutral = linearToSrgb((minLuminance + ceiling) / 2f)
-        return Color(neutral, neutral, neutral)
-    }
-
-    val factor = ceiling / luminance
-    return darken(color, factor)
+    if (luminance <= maxLuminance) return color
+    return darken(color, maxLuminance / luminance)
 }
 
 /** 相对亮度（WCAG 2.1 定义），0 = 黑、1 = 白。 */

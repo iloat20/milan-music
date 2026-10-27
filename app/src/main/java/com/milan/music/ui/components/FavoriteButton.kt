@@ -19,6 +19,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
@@ -48,6 +50,13 @@ fun FavoriteButton(
     label: String,
     modifier: Modifier = Modifier,
 ) {
+    // 描述挂在**外框**上，不挂在图标里。图标在 `AnimatedContent` 内部，切换的瞬间新旧
+    // 两个图标同时存在于组合中；描述若留在图标上，TalkBack 会把两句一起读（"喜欢
+    // 取消喜欢"）。锚在一处，永远只有一句，且随 targetState 换。
+    val description = stringResource(
+        if (isFavorite) R.string.cd_unlike else R.string.cd_like,
+    )
+
     // 48dp 是 Material 的最小触摸目标；图标本身比它小得多。
     Box(
         modifier = modifier
@@ -59,7 +68,8 @@ fun FavoriteButton(
                 // 变更"，Confirm 表达的是"生效了"。方向由图标与颜色说，不必让手也去分辨。
                 haptic = HapticFeedbackType.Confirm,
                 onClick = onToggle,
-            ),
+            )
+            .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
         AnimatedContent(
@@ -88,7 +98,7 @@ fun FavoriteButton(
                 } else {
                     Icons.Rounded.FavoriteBorder
                 },
-                contentDescription = if (liked) stringResource(R.string.cd_unlike) else stringResource(R.string.cd_like),
+                contentDescription = null,
                 tint = if (liked) LikedRed else unselectedTint,
                 modifier = Modifier.size(iconSize),
             )

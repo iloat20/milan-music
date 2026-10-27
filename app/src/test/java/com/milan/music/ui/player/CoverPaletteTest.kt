@@ -204,6 +204,33 @@ class CoverPaletteTest {
     }
 
     /**
+     * 超过上限的颜色要被压到上限，且**不能被压成灰**。
+     *
+     * 压暗是在线性空间里三个通道乘同一个系数，比例不变 —— 所以明亮橙压到 0.10 仍然是
+     * 橙，通道之间必须还差得出来。若哪天改成"混黑"或"取平均"，亮度断言照样过，只有
+     * 这一条会红。
+     *
+     * 附带钉住 [shade] 的一处**曾经写错**的注释：它上面那段"纯黑给中性色"的分支永远
+     * 走不到（纯黑亮度 0 ≤ 任何非负上限，而上一句已经原样返回），注释承诺的行为从未
+     * 发生过。纯黑封面的兜底在 [paletteOf] 上游，见
+     * [blackCoverFallsBackInsteadOfReturningBlack]。
+     */
+    @Test
+    fun `a colour above the ceiling is darkened without losing its hue`() {
+        val orange = Color(0xFFB06018)
+        val shaded = shade(orange, maxLuminance = 0.10f)
+
+        assertTrue(
+            "亮度 ${luminanceOf(shaded)} 仍高于上限",
+            luminanceOf(shaded) <= 0.10f + 1e-3f,
+        )
+        val spread = maxOf(shaded.red, shaded.green, shaded.blue) -
+            minOf(shaded.red, shaded.green, shaded.blue)
+        assertTrue("压暗后三个通道挤成灰色了（极差 $spread）", spread > 0.08f)
+        assertTrue("色相没保住：橙色的红通道不再大于蓝通道", shaded.red > shaded.blue)
+    }
+
+    /**
      * 一张三段的合成封面：上中下各一种颜色，用来模拟真实封面的纵向色差。
      */
     private fun cover(color: Color, top: Color = color, bottom: Color = color): IntArray {
