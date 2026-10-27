@@ -129,7 +129,12 @@ class PlayerController(
         scope.launch {
             _progress.subscriptionCount.collect { count ->
                 progressObserved = count > 0
-                if (progressObserved && controller?.isPlaying == true) {
+                // Same released-controller hazard as everywhere else, except that this
+                // collector must never die: it is the only thing that starts the ticker
+                // again after the player sheet is reopened. Swallowing the read is safe
+                // because `onDisconnected` does the actual teardown.
+                val playing = runCatching { controller?.isPlaying == true }.getOrDefault(false)
+                if (progressObserved && playing) {
                     startProgressLoop()
                 } else {
                     stopProgressLoop()
@@ -150,6 +155,27 @@ class PlayerController(
         }
     }
 
+    /**
+     * The session went away: the service was killed, unbound, or stopped by the user.
+     *
+     * media3 releases the controller itself in that case, so [controller] must stop
+     * pointing at it. Every call on a released controller throws `IllegalStateException`
+     * from `checkNotReleased()` — on the main thread, with no try/catch above it, so a
+     * low-memory kill of the service followed by a tap on the mini player was enough to
+     * take the process down.
+     *
+     * Nothing is reconnected here: the queue lives in the service, so a fresh session
+     * starts empty. The next user action binds again through the `pendingActions` path
+     * in [togglePlayPause] / [play], and the cleared state is the honest description of
+     * "nothing is playing".
+     */
+    private val sessionListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            Log.i(TAG, "session disconnected; detaching from playback service")
+            detachSession()
+        }
+    }
+
     fun connect() {
         if (controller != null || connection != null) return
 
@@ -158,7 +184,9 @@ class PlayerController(
             context,
             ComponentName(context, PlaybackService::class.java),
         )
-        val future = MediaController.Builder(context, token).buildAsync()
+        val future = MediaController.Builder(context, token)
+            .setListener(sessionListener)
+            .buildAsync()
         connection = future
 
         future.addListener(
@@ -209,28 +237,79 @@ class PlayerController(
      * (see [onUiStopped]). When there is nothing bound the call is a no-op.
      */
     fun release() {
-        if (controller == null && connection == null) return
-        // Invalidate any in-flight connect: its callback must not install a
-        // controller after this point (see [connectEpoch]).
-        connectEpoch++
+        val mediaController = controller
+        val future = connection
+        if (mediaController == null && future == null) return
         Log.d(TAG, "release: detaching from playback service (queue=${_state.value.queueSize})")
-        progressJob?.cancel()
-        progressJob = null
-        pendingActions.clear()
-        controller?.removeListener(listener)
-        controller?.release()
-        controller = null
-        connection?.let { MediaController.releaseFuture(it) }
-        connection = null
-        queue = emptyList()
+        detachSession()
         // [trackIndex] is deliberately not cleared: with a queue still loaded in the
         // session, the notification keeps resolving metadata for it. It is replaced
         // wholesale by the next playQueue().
-        // A later reconnect must be able to push a widget update even when the first
-        // snapshot matches the last one before the release.
+        //
+        // Both calls below can throw when the session died first: media3 has released
+        // the controller already and the `onDisconnected` callback may still be in
+        // flight. Tearing down is best effort, never a reason to take the process down.
+        mediaController?.let { detached ->
+            runCatching { detached.removeListener(listener) }
+                .onFailure { Log.w(TAG, "removeListener on a lost session", it) }
+            runCatching { detached.release() }
+                .onFailure { Log.w(TAG, "release on a lost session", it) }
+        }
+        future?.let { pending ->
+            runCatching { MediaController.releaseFuture(pending) }
+                .onFailure { Log.w(TAG, "releaseFuture on a lost session", it) }
+        }
+    }
+
+    /**
+     * Drops every reference to the session and republishes an empty state.
+     *
+     * Shared by [release] (we chose to detach) and [sessionListener] (the session died
+     * under us) because `controller == null` is the only state [connect] will bind from,
+     * and both paths have to reach it identically.
+     *
+     * Pending actions are dropped too: they were addressed to the session that no longer
+     * exists, and replaying them into a fresh, empty one would carry out commands the
+     * user issued against a different queue. [lastWidgetSnapshot] is cleared so a later
+     * connect still pushes a widget update for the same track.
+     */
+    private fun detachSession() {
+        // Invalidate any in-flight connect: its callback must not install a controller
+        // after this point (see [connectEpoch]).
+        connectEpoch++
+        progressJob?.cancel()
+        progressJob = null
+        pendingActions.clear()
+        controller = null
+        connection = null
+        queue = emptyList()
         lastWidgetSnapshot = null
         _state.value = PlayerUiState()
         _progress.value = PlaybackProgress()
+    }
+
+    /**
+     * Runs [block] against the live controller, treating a released one as a lost session.
+     *
+     * [sessionListener] arrives as an ordinary main-thread message, so a tap that lands
+     * between the session dying and that message being dispatched still sees a non-null
+     * field and hits `checkNotReleased()`. Catching here keeps that window from reaching
+     * the uncaught exception handler; anything else that raises `IllegalStateException`
+     * (a call made off the main thread) is logged at error level instead of swallowed.
+     *
+     * @return whether the call ran, so callers can skip publishing a result that no
+     * session produced.
+     */
+    private fun sessionCall(action: String, block: (MediaController) -> Unit): Boolean {
+        val mediaController = controller ?: return false
+        return try {
+            block(mediaController)
+            true
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "$action failed on a released controller; detaching", e)
+            detachSession()
+            false
+        }
     }
 
     /**
@@ -286,8 +365,7 @@ class PlayerController(
         autoPlay: Boolean = true,
     ) {
         if (tracks.isEmpty()) return
-        val mediaController = controller
-        if (mediaController == null) {
+        if (controller == null) {
             pendingActions.addLast {
                 playQueue(tracks, startIndex, startPositionMs, shuffle, repeatMode, autoPlay)
             }
@@ -301,38 +379,41 @@ class PlayerController(
         // race an earlier resolution.
         trackIndex.replace(tracks)
         val items = tracks.map { it.toMediaItem() }
-        mediaController.setMediaItems(items, index, startPositionMs.coerceAtLeast(0L))
-        // Playback always starts in shuffle mode; the user can still turn it off
-        // from the player screen.
-        mediaController.shuffleModeEnabled = shuffle
-        // The mode button is hidden from the UI, so looping is pinned on: without it
-        // playback would simply stop at the end of the shuffled queue.
-        mediaController.repeatMode = repeatMode
-        mediaController.prepare()
-        if (autoPlay) {
-            mediaController.play()
-        } else {
-            mediaController.pause()
+        sessionCall("playQueue") { mediaController ->
+            mediaController.setMediaItems(items, index, startPositionMs.coerceAtLeast(0L))
+            // Playback always starts in shuffle mode; the user can still turn it off
+            // from the player screen.
+            mediaController.shuffleModeEnabled = shuffle
+            // The mode button is hidden from the UI, so looping is pinned on: without it
+            // playback would simply stop at the end of the shuffled queue.
+            mediaController.repeatMode = repeatMode
+            mediaController.prepare()
+            if (autoPlay) {
+                mediaController.play()
+            } else {
+                mediaController.pause()
+            }
         }
         refresh()
     }
 
     fun togglePlayPause() {
-        val mediaController = controller
-        if (mediaController == null) {
+        if (controller == null) {
             // Triggered from the widget before the session is bound: queue the action
             // and let the connection callback replay it.
             pendingActions.addLast { togglePlayPause() }
             connect()
             return
         }
-        if (mediaController.isPlaying) {
-            mediaController.pause()
-        } else {
-            if (mediaController.playbackState == Player.STATE_IDLE) {
-                mediaController.prepare()
+        sessionCall("togglePlayPause") { mediaController ->
+            if (mediaController.isPlaying) {
+                mediaController.pause()
+            } else {
+                if (mediaController.playbackState == Player.STATE_IDLE) {
+                    mediaController.prepare()
+                }
+                mediaController.play()
             }
-            mediaController.play()
         }
         refresh()
     }
@@ -344,39 +425,44 @@ class PlayerController(
      * toggle would pause if the snapshot restore had already started playback.
      */
     fun play() {
-        val mediaController = controller
-        if (mediaController == null) {
+        if (controller == null) {
             pendingActions.addLast { play() }
             connect()
             return
         }
-        if (mediaController.playbackState == Player.STATE_IDLE) {
-            mediaController.prepare()
+        sessionCall("play") { mediaController ->
+            if (mediaController.playbackState == Player.STATE_IDLE) {
+                mediaController.prepare()
+            }
+            mediaController.play()
         }
-        mediaController.play()
         refresh()
     }
 
     fun next() {
-        val mediaController = controller ?: return
-        when {
-            mediaController.hasNextMediaItem() -> mediaController.seekToNextMediaItem()
-            mediaController.mediaItemCount > 0 -> mediaController.seekTo(0, 0L)
-            else -> return
+        if (controller == null) return
+        sessionCall("next") { mediaController ->
+            when {
+                mediaController.hasNextMediaItem() -> mediaController.seekToNextMediaItem()
+                mediaController.mediaItemCount > 0 -> mediaController.seekTo(0, 0L)
+                else -> return@sessionCall
+            }
+            resumeIfPaused(mediaController)
         }
-        resumeIfPaused(mediaController)
     }
 
     fun previous() {
-        val mediaController = controller ?: return
-        if (mediaController.currentPosition > RESUME_POSITION_MS) {
-            // 只是回到当前曲的开头，不是换曲意图，播放状态保持原样。
-            mediaController.seekTo(0L)
-        } else if (mediaController.hasPreviousMediaItem()) {
-            mediaController.seekToPreviousMediaItem()
-            resumeIfPaused(mediaController)
-        } else {
-            mediaController.seekTo(0L)
+        if (controller == null) return
+        sessionCall("previous") { mediaController ->
+            if (mediaController.currentPosition > RESUME_POSITION_MS) {
+                // 只是回到当前曲的开头，不是换曲意图，播放状态保持原样。
+                mediaController.seekTo(0L)
+            } else if (mediaController.hasPreviousMediaItem()) {
+                mediaController.seekToPreviousMediaItem()
+                resumeIfPaused(mediaController)
+            } else {
+                mediaController.seekTo(0L)
+            }
         }
     }
 
@@ -388,13 +474,15 @@ class PlayerController(
      * showed. The transport button keeps the standard 3-second behaviour.
      */
     fun skipToPrevious() {
-        val mediaController = controller ?: return
-        if (mediaController.hasPreviousMediaItem()) {
-            mediaController.seekToPreviousMediaItem()
-        } else {
-            mediaController.seekTo(0L)
+        if (controller == null) return
+        sessionCall("skipToPrevious") { mediaController ->
+            if (mediaController.hasPreviousMediaItem()) {
+                mediaController.seekToPreviousMediaItem()
+            } else {
+                mediaController.seekTo(0L)
+            }
+            resumeIfPaused(mediaController)
         }
-        resumeIfPaused(mediaController)
     }
 
     /**
@@ -415,12 +503,20 @@ class PlayerController(
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
-        controller?.seekTo(clamped)
-        _progress.update { it.copy(positionMs = clamped) }
+        // Publishing the position is only meaningful if the session took it: after a
+        // lost session [detachSession] already reset the flow to empty, and writing the
+        // seek target there would describe a playback that no longer exists.
+        if (sessionCall("seekTo") { it.seekTo(clamped) }) {
+            _progress.update { it.copy(positionMs = clamped) }
+        }
     }
 
     private fun refresh() {
-        val mediaController = controller ?: return
+        sessionCall("refresh") { mediaController -> publishState(mediaController) }
+    }
+
+    /** Fills [state] and [progress] from a controller known to be live. */
+    private fun publishState(mediaController: MediaController) {
         val mediaItem = mediaController.currentMediaItem
         // Shuffle reorders the playback sequence, so `currentMediaItemIndex` is a
         // position in the shuffled order — not an index into `queue`. The only
@@ -479,7 +575,7 @@ class PlayerController(
             )
         }
 
-        maybeRefreshWidget()
+        maybeRefreshWidget(mediaController)
     }
 
     /**
@@ -488,8 +584,7 @@ class PlayerController(
      * is sent only when the current track or the playing flag actually changes —
      * seeks, buffer transitions and metadata refreshes no longer reach the launcher.
      */
-    private fun maybeRefreshWidget() {
-        val mediaController = controller ?: return
+    private fun maybeRefreshWidget(mediaController: MediaController) {
         val snapshot = mediaController.currentMediaItem?.mediaId?.toLongOrNull() to
             mediaController.isPlaying
         if (snapshot == lastWidgetSnapshot) return
@@ -509,13 +604,20 @@ class PlayerController(
         progressJob = scope.launch {
             while (isActive) {
                 val mediaController = controller ?: break
-                if (!mediaController.isPlaying) break
-                _progress.update {
+                // The session can die between two ticks; `onDisconnected` does the
+                // teardown, this loop only has to stop instead of throwing out of a
+                // coroutine the app scope would have to catch.
+                val next = try {
+                    if (!mediaController.isPlaying) break
                     PlaybackProgress(
                         positionMs = mediaController.currentPosition.coerceAtLeast(0L),
                         durationMs = mediaController.duration.coerceAtLeast(0L),
                     )
+                } catch (e: IllegalStateException) {
+                    Log.d(TAG, "progress loop stopped: session gone", e)
+                    break
                 }
+                _progress.value = next
                 delay(PROGRESS_INTERVAL_MS)
             }
         }
@@ -526,12 +628,13 @@ class PlayerController(
         progressJob = null
         // The final position after a pause or a stop still has to reach the UI;
         // `refresh()` in the same event pass covers it when the player reports one.
-        val mediaController = controller ?: return
-        _progress.update { current ->
-            PlaybackProgress(
-                positionMs = mediaController.currentPosition.coerceAtLeast(0L),
-                durationMs = mediaController.duration.takeIf { it > 0L } ?: current.durationMs,
-            )
+        sessionCall("stopProgressLoop") { mediaController ->
+            _progress.update { current ->
+                PlaybackProgress(
+                    positionMs = mediaController.currentPosition.coerceAtLeast(0L),
+                    durationMs = mediaController.duration.takeIf { it > 0L } ?: current.durationMs,
+                )
+            }
         }
     }
 

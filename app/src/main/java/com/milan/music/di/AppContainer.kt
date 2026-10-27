@@ -1,6 +1,7 @@
 package com.milan.music.di
 
 import android.content.Context
+import android.util.Log
 import com.milan.music.data.media.ArtworkRepository
 import com.milan.music.data.media.LibraryCacheStore
 import com.milan.music.data.media.LibraryRevision
@@ -11,6 +12,7 @@ import com.milan.music.play.PlaybackSnapshotStore
 import com.milan.music.play.PlaybackStartGate
 import com.milan.music.play.PlaybackTrackIndex
 import com.milan.music.play.PlayerController
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,7 +25,24 @@ class AppContainer(context: Context) {
 
     private val appContext = context.applicationContext
 
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * Application-lived scope for the playback controller's tickers and collectors.
+     *
+     * `SupervisorJob` only stops a failure from cancelling *siblings*; the exception
+     * itself still reaches the thread's uncaught handler and takes the process down.
+     * Without a handler here every failure inside a `scope.launch` was an app crash,
+     * while [com.milan.music.play.PlaybackService] — running the same kind of work —
+     * has always had one. The gap is reachable: a released
+     * [androidx.media3.session.MediaController] throws from every call, and several of
+     * those calls run in this scope's coroutines.
+     */
+    val scope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main.immediate +
+            CoroutineExceptionHandler { _, throwable ->
+                Log.e(TAG, "app-scope coroutine failed", throwable)
+            },
+    )
 
     val mediaStore = MediaStoreRepository(appContext)
     val libraryCache = LibraryCacheStore(appContext)
@@ -53,4 +72,8 @@ class AppContainer(context: Context) {
      */
     val trackIndex = PlaybackTrackIndex()
     val player = PlayerController(appContext, scope, trackIndex)
+
+    private companion object {
+        const val TAG = "AppContainer"
+    }
 }

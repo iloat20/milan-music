@@ -210,15 +210,23 @@ fun HomeScreen(
 
     // Re-read the grant when the user comes back from the system settings page;
     // without this the gate stays on screen even after the permission was granted
-    // there, and the app looks broken.
+    // there, and the app looks broken. The same re-read runs in the other direction
+    // too — see [permissionResumeAction].
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         val granted = ContextCompat.checkSelfPermission(context, audioPermissionName()) ==
             PackageManager.PERMISSION_GRANTED
-        if (granted && !hasAudioPermission) {
-            hasAudioPermission = true
-            permanentlyDenied = false
-            permissionPrefs.edit { remove(KEY_AUDIO_PERMANENTLY_DENIED) }
-            viewModel.refresh()
+        when (permissionResumeAction(granted, hasAudioPermission)) {
+            PermissionResume.GRANTED -> {
+                hasAudioPermission = true
+                permanentlyDenied = false
+                permissionPrefs.edit { remove(KEY_AUDIO_PERMANENTLY_DENIED) }
+                viewModel.refresh()
+            }
+            // 权限被撤销后，曲目行还留在内存里，但它们指向的 content:// URI 已经读不到：
+            // 点下去只有 PlaybackService 里的一行 Log.e，用户看到的是"点了没反应"。
+            // 这里必须把界面交回权限门，而不是继续显示一个点不动的列表。
+            PermissionResume.REVOKED -> hasAudioPermission = false
+            PermissionResume.UNCHANGED -> Unit
         }
     }
 
