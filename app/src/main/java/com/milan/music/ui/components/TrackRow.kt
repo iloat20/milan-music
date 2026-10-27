@@ -1,7 +1,5 @@
 package com.milan.music.ui.components
 
-import android.content.Context
-import android.provider.Settings
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -25,12 +23,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.milan.music.data.media.ArtworkRepository
@@ -38,6 +34,7 @@ import com.milan.music.data.model.Track
 import com.milan.music.ui.text.artistText
 import com.milan.music.ui.text.titleText
 import com.milan.music.ui.theme.MilanMotion
+import com.milan.music.ui.util.rememberAnimationScale
 
 @Composable
 fun TrackRow(
@@ -136,26 +133,18 @@ internal fun shouldAnimatePlayingBars(isPlaying: Boolean, uiCovered: Boolean): B
 internal fun barsShouldAnimate(animationScale: Float): Boolean = animationScale > 0f
 
 /**
- * 读系统的动画时长倍率。
+ * 当前曲目行尾的"正在播放"三根柱。
  *
- * 读不到时按 1 处理：宁可多动一帧，也不要因为一次读取失败让"正在播放"变成三根
- * 不动的短棍 —— 那会被读成"卡住了"。
+ * 倍率走 [rememberAnimationScale] 而不是就地读一次：用户在运行期打开"移除动画"，
+ * 这三根柱必须当场停下，不能等到下次冷启动。
  */
-private fun systemAnimationScale(context: Context): Float =
-    Settings.Global.getFloat(
-        context.contentResolver,
-        Settings.Global.ANIMATOR_DURATION_SCALE,
-        1f,
-    )
-
 @Composable
 fun PlayingBars(
     color: Color,
     modifier: Modifier = Modifier,
     barCount: Int = 3,
 ) {
-    val context = LocalContext.current
-    val animationScale = remember(context) { systemAnimationScale(context) }
+    val animationScale = rememberAnimationScale()
 
     // 早返回而不是"动画照跑、只忽略结果"：后者在倍率为 0 时仍会每帧请求一次
     // 布局，正是"移除动画"要省掉的那部分。
