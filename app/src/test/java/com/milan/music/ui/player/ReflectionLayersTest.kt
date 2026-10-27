@@ -37,6 +37,31 @@ class ReflectionLayersTest {
     }
 
     @Test
+    fun `the ladder draws three layers and keeps the seam blur`() {
+        // 每一级都是**一次全屏离屏合成 + 一次 `Modifier.blur`**：1080×2400 上每层约
+        // 10MB 缓冲，5 层合计约 50MB GPU 内存。2026-10-27 定为 3 层（4 个 stop，index 0
+        // 由清晰封面本体承担）。
+        //
+        // 这条不写就守不住：加一级不会有任何编译或运行期提示，只有中低端机的掉帧会说
+        // 出来 —— 而那时已经找不到是哪次改动加的了。
+        assertEquals("阶梯只画 3 层（stop 数 = 绘制层数 + 1）", 4, BlurRamp.size)
+        assertEquals(listOf(0f, 5f, 12f, 34f), BlurRamp.map { it.radius.value })
+
+        // 层数与半径可以变，**这两条不能**：
+        //  - 过渡带高度一变，封面正文被糊掉的范围就变了；
+        //  - 镜面线的糊度是接缝的锚点，改了等于重画接缝。
+        assertEquals("过渡带高度", 128.dp, CoverRamp)
+        assertEquals(12.dp, BlurRamp[SeamStopIndex].radius)
+
+        // 等效曲线必须与 6 级时基本重合（离线对照见 `review/ramp3-compare.py`）：
+        // 掉的那两级几乎落在邻两级的连线上，所以 blurAt 的偏差在 1.5dp 以内。
+        // 这条是"少画两层但画质不塌"的可验证形式 —— 只断言层数会把这件事交给肉眼。
+        assertEquals(5f, blurAt(-44.dp).value, 0.01f)
+        assertEquals(12f, blurAt(0.dp).value, 0.01f)
+        assertEquals(20.8f, blurAt(96.dp).value, 1.5f)
+    }
+
+    @Test
     fun `adjacent steps differ by less than a factor of three`() {
         // 相邻两级差得越远，交接处越像"换了一层" —— 那正是上一版被否掉的重影感。
         val radii = BlurRamp.map { it.radius.value }.filter { it > 0f }
@@ -175,7 +200,7 @@ class ReflectionLayersTest {
     @Test
     fun `sampling the envelope loses less than a pixel of alpha`() {
         // 包络是"权重 × 衰减"的乘积，只能采样成多段线性渐变。采样太稀会读出带状：
-        // 阶梯里最窄的一段（0→4dp 那一级）只跨 42dp，步长超过它的一半就会顶出
+        // 阶梯里最窄的一段（-44dp → 0dp）只跨 44dp，步长超过它的一半就会顶出
         // 2%（≈5/255）的台阶 —— 第 54 批就是这一条先红，才把采样改成自适应的。
         val total = node()
         for (index in 1..BlurRamp.lastIndex) {

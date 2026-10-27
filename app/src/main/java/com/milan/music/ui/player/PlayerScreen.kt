@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -147,8 +148,26 @@ private val ProgressEndInset = 42.dp
  */
 private val FieldTopPadding = 59.dp
 
-/** 歌曲信息与进度条之间的距离。 */
-private val ProgressTopGap = 26.dp
+/**
+ * 歌曲信息与进度条之间的距离。
+ *
+ * 26dp → **4dp**（第 79 批）：进度条的命中区抬到 [ProgressTouchHeight] 之后，多出来的
+ * 22dp 全部从这里让出来。这样条的中心、时间标签、控制条**一格都没动** —— 只是把原来
+ * 的空白变成了可点区域。别把它改回去，否则整块信息区会往下沉 22dp。
+ */
+internal val ProgressTopGap = 4.dp
+
+/** 进度条自己画出来的高度（含拖动时变粗的那几个 dp 的余量）。 */
+internal val ProgressBarHeight = 26.dp
+
+/**
+ * 进度条的**命中区**高度。
+ *
+ * 48dp 是 Material 的最小触摸目标；条本身只有 [ProgressBarHeight] 高，手指按在条上下一
+ * 两个像素就会落空。命中区与绘制区因此分开：命中区 48dp，条画在它的底部 ——
+ * 向上扩不向下扩是有意的，见 [AppleMusicProgress] 里的说明。
+ */
+internal val ProgressTouchHeight = 48.dp
 
 /** 进度条时间标签与播放控制之间的距离。控制整组因此再往下落一点，离拇指更近。 */
 private val ControlsTopGap = 26.dp
@@ -842,23 +861,33 @@ private fun AppleMusicProgress(
         formatDuration(durationMs),
     )
 
+    // 手势里读的是"最新值"，不是组合那一刻的值：`pointerInput` 的 key 若带上时长，
+    // 时长一变（首帧 0 → 会话报出真实值、或切歌）就会把正在进行的拖动**取消**掉 ——
+    // 手指还在屏幕上，条却弹回去了。
+    val currentDuration by rememberUpdatedState(durationMs)
+    val currentOnSeek by rememberUpdatedState(onSeek)
+
     Column {
-        Canvas(
+        // **触摸区与绘制区分开**：命中区 48dp（Material 最小目标），条本身仍画在底部
+        // 那 26dp 里。多出来的 22dp **全部向上**扩 —— 配合 [ProgressTopGap] 由 26dp
+        // 收到 4dp，条的位置、时间标签的位置、控制条的位置都不动一格。
+        // 若改成居中放大、上下各借 11dp，条与标签会整体下移 11dp，那是一次可见的位移。
+        Box(
             modifier = Modifier
                 // padding 在 fillMaxWidth 之前 = 先让出两端，再在剩下的宽度里铺满。
                 // 手势坐标也用这个宽度归一化，所以点到哪儿就是哪儿。
                 .padding(start = ProgressStartInset, end = ProgressEndInset)
                 .fillMaxWidth()
-                .height(26.dp)
-                .pointerInput(durationMs) {
+                .height(ProgressTouchHeight)
+                .pointerInput(Unit) {
                     detectHorizontalDragGestures(
                         onDragStart = { offset ->
                             dragging = true
                             dragRatio = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
                         },
                         onDragEnd = {
-                            if (durationMs > 0L) {
-                                onSeek((dragRatio * durationMs).toLong())
+                            if (currentDuration > 0L) {
+                                currentOnSeek((dragRatio * currentDuration).toLong())
                             }
                             dragging = false
                         },
@@ -869,10 +898,12 @@ private fun AppleMusicProgress(
                         },
                     )
                 }
-                .pointerInput(durationMs) {
+                .pointerInput(Unit) {
                     detectTapGestures { offset ->
-                        if (durationMs > 0L) {
-                            onSeek((offset.x / size.width.toFloat() * durationMs).toLong())
+                        if (currentDuration > 0L) {
+                            currentOnSeek(
+                                (offset.x / size.width.toFloat() * currentDuration).toLong(),
+                            )
                         }
                     }
                 }
@@ -884,43 +915,50 @@ private fun AppleMusicProgress(
                 .semantics {
                     progressBarRangeInfo = ProgressBarRangeInfo(shownRatio, 0f..1f)
                     stateDescription = progressDescription
-                    if (durationMs > 0L) {
+                    if (currentDuration > 0L) {
                         setProgress { target ->
-                            onSeek((target.coerceIn(0f, 1f) * durationMs).toLong())
+                            currentOnSeek((target.coerceIn(0f, 1f) * currentDuration).toLong())
                             true
                         }
                     }
                 },
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            val height = barHeight.toPx()
-            val centerY = size.height / 2f
-            val corner = CornerRadius(height / 2f, height / 2f)
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(ProgressBarHeight),
+            ) {
+                val height = barHeight.toPx()
+                val centerY = size.height / 2f
+                val corner = CornerRadius(height / 2f, height / 2f)
 
-            drawRoundRect(
-                color = OnDark.copy(alpha = 0.28f),
-                topLeft = Offset(0f, centerY - height / 2f),
-                size = Size(size.width, height),
-                cornerRadius = corner,
-            )
+                drawRoundRect(
+                    color = OnDark.copy(alpha = 0.28f),
+                    topLeft = Offset(0f, centerY - height / 2f),
+                    size = Size(size.width, height),
+                    cornerRadius = corner,
+                )
 
-            val playedWidth = size.width * shownRatio
-            drawRoundRect(
-                color = OnDark,
-                topLeft = Offset(0f, centerY - height / 2f),
-                size = Size(playedWidth, height),
-                cornerRadius = corner,
-            )
+                val playedWidth = size.width * shownRatio
+                drawRoundRect(
+                    color = OnDark,
+                    topLeft = Offset(0f, centerY - height / 2f),
+                    size = Size(playedWidth, height),
+                    cornerRadius = corner,
+                )
 
-            // 位置夹进两端：0:00 时圆点不该有一半被屏幕边缘切掉。
-            val thumbRadius = height * 1.15f * thumbScale
-            drawCircle(
-                color = OnDark,
-                radius = thumbRadius,
-                center = Offset(
-                    x = playedWidth.coerceIn(thumbRadius, size.width - thumbRadius),
-                    y = centerY,
-                ),
-            )
+                // 位置夹进两端：0:00 时圆点不该有一半被屏幕边缘切掉。
+                val thumbRadius = height * 1.15f * thumbScale
+                drawCircle(
+                    color = OnDark,
+                    radius = thumbRadius,
+                    center = Offset(
+                        x = playedWidth.coerceIn(thumbRadius, size.width - thumbRadius),
+                        y = centerY,
+                    ),
+                )
+            }
         }
 
         Spacer(Modifier.height(2.dp))
