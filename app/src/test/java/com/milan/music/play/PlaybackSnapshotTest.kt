@@ -131,4 +131,51 @@ class PlaybackSnapshotTest {
         }
         Unit
     }
+
+    /**
+     * 位置带着"属于第几项"落盘之后，冷启动不会把上一首的时间戳套在新歌上。
+     *
+     * 队列与位置分居两个 store，每个写入方都是两步。切歌把 index 写成 4、位置那一步
+     * 还没落地时，ticker 带着**上一首**（index 3）的 5 秒位置后落地 —— 它的时间戳
+     * 更新，旧判据（纯时间戳）会采信它，于是冷启动从新歌第 5 秒开始播。
+     */
+    @Test
+    fun `a position written for another item is never resumed`() {
+        assertFalse(
+            positionMatchesQueue(
+                queueIndex = 4,
+                queueUpdatedAtMs = 1_000L,
+                positionIndex = 3,
+                positionUpdatedAtMs = 1_500L,
+            ),
+        )
+    }
+
+    @Test
+    fun `a position for the same item survives a newer queue write`() {
+        assertTrue(
+            positionMatchesQueue(
+                queueIndex = 4,
+                queueUpdatedAtMs = 1_000L,
+                positionIndex = 4,
+                positionUpdatedAtMs = 1_500L,
+            ),
+        )
+    }
+
+    /**
+     * 时间戳仍然是第二道闸：同一个 index 上换了歌（重扫后重排）时，只有它能把
+     * 旧位置挡下来。index 不在快照里的老格式也走这条。
+     */
+    @Test
+    fun `the timestamp still guards the same index`() {
+        assertFalse("位置比队列旧：位置属于换队列之前的那首", positionMatchesQueue(2, 1_000L, 2, 900L))
+        assertTrue("位置比队列新：正常 ticker", positionMatchesQueue(2, 1_000L, 2, 1_100L))
+    }
+
+    @Test
+    fun `a snapshot written before position_index existed falls back to timestamps`() {
+        assertTrue(positionMatchesQueue(4, 1_000L, null, 1_500L))
+        assertFalse(positionMatchesQueue(4, 1_000L, null, 900L))
+    }
 }

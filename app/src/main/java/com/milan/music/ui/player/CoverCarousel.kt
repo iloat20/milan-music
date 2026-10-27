@@ -1,7 +1,5 @@
 package com.milan.music.ui.player
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -46,6 +44,8 @@ import com.milan.music.data.model.Track
 import com.milan.music.play.PlayerController
 import com.milan.music.ui.components.CoverArt
 import com.milan.music.ui.theme.MilanMotion
+import com.milan.music.ui.util.DragOffset
+import com.milan.music.ui.util.rememberDragOffset
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -278,8 +278,12 @@ internal fun CoverCarousel(
      * 放在外面是因为**倒影叠层也要跟着走**：倒影是封面的镜像，封面被手指拖走时
      * 倒影必须一起走，否则滑动过程中会看到一层钉在屏幕上、内容和手指底下的封面
      * 对不上的"下半部分"（2026-10-23 用户原话："可以清楚地看到一个叠加层"）。
+     *
+     * 写入必须同步（[DragOffset] 的 `set`）：松手那次 `onDragEnd` 与最后一个
+     * `onHorizontalDrag` 可能在同一批指针事件里，走 `scope.launch { snapTo }`
+     * 时阈值读的是上一批的位移，快速轻扫会整段丢失。
      */
-    offsetX: Animatable<Float, AnimationVector1D> = remember { Animatable(0f) },
+    offsetX: DragOffset = rememberDragOffset(),
     /**
      * 隔壁页要不要自己淡出底边。
      *
@@ -346,50 +350,59 @@ internal fun CoverCarousel(
                 if (incoming != null) {
                     isAnimating.value = true
                     scope.launch {
-                        // One pitch: the outgoing card leaves the window completely and the
-                        // incoming one is already sitting where it stopped.
-                        //
-                        // 时长而非弹簧，是刻意的例外：这段位移必须**正好**停在一个 pitch 上，
-                        // 弹簧过冲会越过行边缘，露出没有封面的空白带。位移由手势给定，不是
-                        // 物理量，Effects 层的时长在这里比 Spatial 层的弹簧更诚实。
-                        val target = if (toNext) -pitchPx else pitchPx
-                        offsetX.animateTo(
-                            target,
-                            tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
-                        )
-
-                        // The transport's previous() restarts the current song when it has
-                        // been playing for more than 3 s. A swipe revealed the previous
-                        // cover, so it must move to that track instead.
-                        if (toNext) player.next() else player.skipToPrevious()
-
-                        // The controller is asynchronous. Hold the row on the incoming page
-                        // until the session actually reports it, then adopt its neighbours
-                        // and reset the offset together.
-                        val switched = withTimeoutOrNull(SWITCH_TIMEOUT_MS) {
-                            player.state.first { it.currentTrack?.id == incoming.id }
-                        } != null
-                        if (switched) {
-                            val latest = player.state.value
-                            // 与 `offsetX.snapTo(0f)` 同一批快照写入：页面行、中央曲目、
-                            // 位移三者一起生效，中间不存在"新页在正中但坐标还是旧的"帧。
-                            latestPublish(
-                                CoverPages(
-                                    previous = latest.previousTrack,
-                                    current = latest.currentTrack,
-                                    next = latest.nextTrack,
-                                ),
+                        // 标志位必须在 finally 里复位：这个块现在有提前返回（动画被打断）
+                        // 和会抛的等待（`withTimeoutOrNull` 里的 flow）。漏一次复位，
+                        // `isAnimating` 就永久为 true —— 之后所有手势与翻页都被吃掉。
+                        try {
+                            // One pitch: the outgoing card leaves the window completely and the
+                            // incoming one is already sitting where it stopped.
+                            //
+                            // 时长而非弹簧，是刻意的例外：这段位移必须**正好**停在一个 pitch 上，
+                            // 弹簧过冲会越过行边缘，露出没有封面的空白带。位移由手势给定，不是
+                            // 物理量，Effects 层的时长在这里比 Spatial 层的弹簧更诚实。
+                            val target = if (toNext) -pitchPx else pitchPx
+                            // 动画只是翻页的第一步：切歌请求必须等它**走完**再发，否则
+                            // 会话已经换了曲目、封面还在半路。`animateTo` 现在由
+                            // [DragOffset] 自己起协程（这样手势能打断它），所以要 join。
+                            val slide = offsetX.animateTo(
+                                target,
+                                tween(MilanMotion.MediumMs, easing = MilanMotion.Standard),
                             )
-                            offsetX.snapTo(0f)
-                        } else {
-                            // The seek never landed (session gone): put the row back
-                            // rather than showing a track that is not playing.
-                            offsetX.animateTo(
-                                0f,
-                                MilanMotion.Settle,
-                            )
+                            slide.join()
+                            // 组合被拆掉时动画是被取消的：到此为止，否则会隔着一步去切歌。
+                            if (slide.isCancelled) return@launch
+
+                            // The transport's previous() restarts the current song when it has
+                            // been playing for more than 3 s. A swipe revealed the previous
+                            // cover, so it must move to that track instead.
+                            if (toNext) player.next() else player.skipToPrevious()
+
+                            // The controller is asynchronous. Hold the row on the incoming page
+                            // until the session actually reports it, then adopt its neighbours
+                            // and reset the offset together.
+                            val switched = withTimeoutOrNull(SWITCH_TIMEOUT_MS) {
+                                player.state.first { it.currentTrack?.id == incoming.id }
+                            } != null
+                            if (switched) {
+                                val latest = player.state.value
+                                // 与 `offsetX.set(0f)` 同一批快照写入：页面行、中央曲目、
+                                // 位移三者一起生效，中间不存在"新页在正中但坐标还是旧的"帧。
+                                latestPublish(
+                                    CoverPages(
+                                        previous = latest.previousTrack,
+                                        current = latest.currentTrack,
+                                        next = latest.nextTrack,
+                                    ),
+                                )
+                                offsetX.set(0f)
+                            } else {
+                                // The seek never landed (session gone): put the row back
+                                // rather than showing a track that is not playing.
+                                offsetX.animateTo(0f, MilanMotion.Settle)
+                            }
+                        } finally {
+                            isAnimating.value = false
                         }
-                        isAnimating.value = false
                     }
                 }
             }
@@ -423,8 +436,10 @@ internal fun CoverCarousel(
                                 // would promise a page that never arrives.
                                 val min = if (latestPages.next != null) -pitchPx else 0f
                                 val max = if (latestPages.previous != null) pitchPx else 0f
-                                val target = (offsetX.value + dragAmount).coerceIn(min, max)
-                                scope.launch { offsetX.snapTo(target) }
+                                // 同步写入，见 [DragOffset]：松手与最后一次移动可能落在
+                                // 同一批指针事件里，下面的阈值判定读到的必须是手指真
+                                // 正停下的位置。
+                                offsetX.set((offsetX.value + dragAmount).coerceIn(min, max))
                             }
                             change.consume()
                         },
@@ -437,22 +452,12 @@ internal fun CoverCarousel(
                                     latestPages.next != null -> latestLaunchSwitch(true)
                                 offsetX.value > swipeThreshold &&
                                     latestPages.previous != null -> latestLaunchSwitch(false)
-                                else -> scope.launch {
-                                    offsetX.animateTo(
-                                        0f,
-                                        MilanMotion.Settle,
-                                    )
-                                }
+                                else -> offsetX.animateTo(0f, MilanMotion.Settle)
                             }
                         },
                         onDragCancel = {
                             if (!isAnimating.value) {
-                                scope.launch {
-                                    offsetX.animateTo(
-                                        0f,
-                                        MilanMotion.Settle,
-                                    )
-                                }
+                                offsetX.animateTo(0f, MilanMotion.Settle)
                             }
                         },
                     )
@@ -547,7 +552,7 @@ private fun BoxScope.CoverSlot(
     track: Track?,
     slot: Int,
     pitchPx: Float,
-    offsetX: Animatable<Float, AnimationVector1D>,
+    offsetX: DragOffset,
     artworkRepository: ArtworkRepository,
     backgroundColor: Color,
     fadeBottom: Boolean,

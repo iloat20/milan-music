@@ -52,6 +52,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Hosts the ExoPlayer instance in a foreground service so playback survives
@@ -475,10 +477,18 @@ class PlaybackService : MediaLibraryService() {
      * [scope] is what keeps a track change cheap. `CURSOR` skips the id list entirely —
      * see [QueueSnapshotPolicy] — so skipping through a 1 233-track library no longer
      * re-encodes a 12 KB string and writes two files per track.
+     *
+     * Runs under [snapshotWriteLock]: see there for why the read-then-write pair has to
+     * be atomic.
      */
     private suspend fun persistQueue(
         player: Player,
         scope: QueueSnapshotScope = QueueSnapshotScope.FULL,
+    ): Unit = snapshotWriteLock.withLock { persistQueueLocked(player, scope) }
+
+    private suspend fun persistQueueLocked(
+        player: Player,
+        scope: QueueSnapshotScope,
     ) {
         val store = snapshotStore ?: return
         if (scope == QueueSnapshotScope.CURSOR) {
@@ -531,6 +541,9 @@ class PlaybackService : MediaLibraryService() {
      * Guarded on `mediaItemCount` because `load()` rejects a snapshot with no ids — a
      * cursor on top of an empty queue store would look like a corrupt snapshot rather
      * than a missing one. When that happens the next event is forced to be full.
+     *
+     * Only called from [persistQueueLocked]: it reads three player values and assumes
+     * nothing else writes a snapshot in between.
      */
     private suspend fun persistCursor(player: Player, store: PlaybackSnapshotStore) {
         val count = player.mediaItemCount
@@ -553,14 +566,36 @@ class PlaybackService : MediaLibraryService() {
 
     private suspend fun persistPosition(player: Player) {
         val store = snapshotStore ?: return
-        saveSnapshotSafely("position", ::logSnapshotFailure) {
-            store.savePlaybackState(
-                wasPlaying = player.playWhenReady &&
-                    player.playbackState != Player.STATE_ENDED,
-                positionMs = player.currentPosition.coerceAtLeast(0L),
-            )
+        snapshotWriteLock.withLock {
+            saveSnapshotSafely("position", ::logSnapshotFailure) {
+                store.savePlaybackState(
+                    wasPlaying = player.playWhenReady &&
+                        player.playbackState != Player.STATE_ENDED,
+                    positionMs = player.currentPosition.coerceAtLeast(0L),
+                    // Read under the same lock as the queue writers, so the item this
+                    // position belongs to cannot change between the read and the write.
+                    currentIndex = player.currentMediaItemIndex,
+                )
+            }
         }
     }
+
+    /**
+     * 快照写只有一个入口，一次只跑一个。
+     *
+     * 每个写入方都是"读播放器状态 → 写队列 store → 写位置 store"。三条路径
+     * （切歌的 CURSOR、时间轴变化的 FULL、十五秒一次的 ticker）各自 `launch`，
+     * 落到 `Dispatchers.IO` 上并行执行，完成顺序与发起顺序无关。两种后果都出现过：
+     *
+     *  - 旧的写入后落地，把新的 index 覆盖回去（冷启动回到**上一首**）；
+     *  - ticker 带着上一首的位置，后落地但时间戳更新，于是那一秒被算作"属于新的一首"
+     *    （冷启动从新歌的第 37 秒开始播）。
+     *
+     * 加锁之后"读到的状态"与"写下的状态"之间没有别的写入方插入，最后落地的一定是
+     * 最后发起的。位置侧的 `position_index` 是第二道闸：进程在两次 edit 之间被杀时
+     * 锁已经不存在了，只有落盘的数据能证明位置属于谁。
+     */
+    private val snapshotWriteLock = Mutex()
 
     /**
      * A snapshot is an optimization; storage failure must not escape into [serviceScope].

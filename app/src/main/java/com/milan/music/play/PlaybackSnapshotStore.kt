@@ -37,7 +37,11 @@ import java.io.IOException
 @Serializable
 data class PlaybackSnapshot(
     val trackIds: List<Long> = emptyList(),
-    /** Index into the unshuffled queue, matching `Player.currentMediaItemIndex`. */
+    /**
+     * Index into [trackIds] — that is, into the timeline order the queue was saved in,
+     * which shuffle had already applied. Same value as `Player.currentMediaItemIndex`
+     * at write time.
+     */
     val currentIndex: Int = 0,
     val positionMs: Long = 0L,
     val shuffleModeEnabled: Boolean = true,
@@ -111,6 +115,32 @@ internal fun Int.validRepeatMode(): Int = when (this) {
 }
 
 /**
+ * 持久化的位置是否仍然属于队列指着的那一项。
+ *
+ * 队列和位置分居两个 DataStore，每个写入方都是"先写队列、再写位置"两步。两种交叠
+ * 会留下**位置属于上一首**的快照：
+ *
+ *  - 进程在两次 edit 之间被杀；
+ *  - 两个写入方的 IO 完成顺序与发起顺序相反（切歌撞上十五秒一次的 ticker）。
+ *
+ * `load()` 原先只有时间戳比较，而它比的是 `System.currentTimeMillis()`：一次时钟
+ * 回拨就能让更旧的写入看起来更新。`position_index` 是**精确**判据 —— 它与位置写在
+ * 同一批里，天然同属一首；时间戳退化成第二道闸，挡"同一个 index 但队列被换过"
+ * 的情况（重扫后同位置换了歌）。
+ *
+ * `positionIndex == null` 是最早的格式：退回纯时间戳比较，升级时不能把位置丢掉。
+ */
+internal fun positionMatchesQueue(
+    queueIndex: Int,
+    queueUpdatedAtMs: Long,
+    positionIndex: Int?,
+    positionUpdatedAtMs: Long,
+): Boolean {
+    if (positionIndex != null && positionIndex != queueIndex) return false
+    return positionUpdatedAtMs >= queueUpdatedAtMs
+}
+
+/**
  * Both stores replace a corrupt file instead of throwing.
  *
  * A snapshot is an optimization: losing it costs one random start, while an uncaught
@@ -148,6 +178,8 @@ class PlaybackSnapshotStore(context: Context) {
     private val updatedAtKey = longPreferencesKey("updated_at")
     private val positionKey = longPreferencesKey("position_ms")
     private val positionUpdatedAtKey = longPreferencesKey("position_updated_at")
+    /** 位置属于队列里的哪一项；见 [positionMatchesQueue]。 */
+    private val positionIndexKey = intPreferencesKey("position_index")
     private val wasPlayingKey = booleanPreferencesKey("was_playing")
 
     suspend fun load(): PlaybackSnapshot? = withContext(Dispatchers.IO) {
@@ -156,18 +188,25 @@ class PlaybackSnapshotStore(context: Context) {
         val ids = rawIds.split(',').mapNotNull { it.toLongOrNull() }
         if (ids.isEmpty()) return@withContext null
         val position = positionPreferences()
+        val currentIndex = queue[currentIndexKey] ?: 0
         val queueUpdatedAt = queue[updatedAtKey] ?: 0L
         // The two stores are written in sequence, not atomically. A newer position is
-        // the normal ticker case; an older one means the queue edit landed and the
-        // position edit did not — the index belongs to the new track while the position
-        // belongs to the track it replaced. Starting the new track at that timestamp is
-        // worse than starting at zero. A snapshot written before this key existed has
-        // no timestamp: treat it as in sync so upgrading does not drop the position.
+        // the normal ticker case; a position that predates the queue (or that was
+        // written for a different item) means the queue edit landed and the position
+        // edit did not — the index belongs to the new track while the position belongs
+        // to the track it replaced. Starting the new track at that timestamp is worse
+        // than starting at zero. A snapshot written before this key existed has no
+        // index: it falls back to the timestamp so upgrading does not drop the position.
         val positionUpdatedAt = position[positionUpdatedAtKey] ?: queueUpdatedAt
-        val positionIsCurrent = positionUpdatedAt >= queueUpdatedAt
+        val positionIsCurrent = positionMatchesQueue(
+            queueIndex = currentIndex,
+            queueUpdatedAtMs = queueUpdatedAt,
+            positionIndex = position[positionIndexKey],
+            positionUpdatedAtMs = positionUpdatedAt,
+        )
         PlaybackSnapshot(
             trackIds = ids,
-            currentIndex = queue[currentIndexKey] ?: 0,
+            currentIndex = currentIndex,
             positionMs = if (positionIsCurrent) position[positionKey] ?: 0L else 0L,
             shuffleModeEnabled = queue[shuffleKey] ?: true,
             repeatMode = queue[repeatKey] ?: Player.REPEAT_MODE_ALL,
@@ -203,6 +242,7 @@ class PlaybackSnapshotStore(context: Context) {
             preferences[positionKey] = snapshot.positionMs.coerceAtLeast(0L)
             preferences[wasPlayingKey] = snapshot.wasPlaying
             preferences[positionUpdatedAtKey] = snapshot.updatedAtMs
+            preferences[positionIndexKey] = snapshot.currentIndex
         }
     }
 
@@ -243,6 +283,7 @@ class PlaybackSnapshotStore(context: Context) {
             preferences[positionKey] = positionMs.coerceAtLeast(0L)
             preferences[wasPlayingKey] = wasPlaying
             preferences[positionUpdatedAtKey] = updatedAtMs
+            preferences[positionIndexKey] = currentIndex
         }
     }
 
@@ -252,8 +293,12 @@ class PlaybackSnapshotStore(context: Context) {
      * Called on every `isPlaying` transition and on the fifteen-second ticker while
      * playback advances. The ticker writes the flag too: it is one small preference in
      * the same edit, and a position-only write would leave a stale `wasPlaying` behind.
+     *
+     * [currentIndex] is the item the position belongs to. It is written next to the
+     * position rather than read from the queue store on load: without it, a position
+     * that lost the race against a track change would be resumed on the *next* track.
      */
-    suspend fun savePlaybackState(wasPlaying: Boolean, positionMs: Long) =
+    suspend fun savePlaybackState(wasPlaying: Boolean, positionMs: Long, currentIndex: Int) =
         withContext(Dispatchers.IO) {
             context.playbackPositionStore.edit { preferences ->
                 preferences[positionKey] = positionMs.coerceAtLeast(0L)
@@ -261,6 +306,7 @@ class PlaybackSnapshotStore(context: Context) {
                 // The ticker only moves the position; its timestamp is newer than the
                 // queue's, which `load` reads as "position still matches this queue".
                 preferences[positionUpdatedAtKey] = System.currentTimeMillis()
+                preferences[positionIndexKey] = currentIndex
             }
         }
 

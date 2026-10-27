@@ -40,7 +40,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -92,9 +91,9 @@ import com.milan.music.ui.text.titleText
 import com.milan.music.ui.theme.MilanMotion
 import com.milan.music.ui.util.formatDuration
 import com.milan.music.ui.util.noRippleClickable
+import com.milan.music.ui.util.rememberDragOffset
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
 
 private val OnDark = Color(0xFFF6F1E8)
 private val OnDarkMuted = Color(0xB3F6F1E8)
@@ -191,7 +190,6 @@ internal fun PlayerScreen(
 ) {
     val playerState by viewModel.playback.collectAsStateWithLifecycle()
     val isFavorite by viewModel.isFavorite.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
 
     val track = playerState.currentTrack
 
@@ -214,7 +212,7 @@ internal fun PlayerScreen(
     var shownTrack by remember { mutableStateOf(track) }
     // 封面横向滑动位移。倒影叠层要跟着封面一起走（见 [CoverCarousel] 的同名参数）：
     // 它画的是"封面底部的继续"，封面被拖走时它也必须走。
-    val coverOffset = remember { Animatable(0f) }
+    val coverOffset = rememberDragOffset()
     LaunchedEffect(track?.id) {
         val target = track ?: return@LaunchedEffect
         val result = viewModel.loadArtwork(target)
@@ -283,7 +281,7 @@ internal fun PlayerScreen(
     // Interactive swipe-down: the sheet follows the finger while the home screen
     // shows through underneath. Past the threshold it animates the rest of the way
     // off-screen before popping; below it springs back.
-    val offsetY = remember { Animatable(0f) }
+    val offsetY = rememberDragOffset()
     val isSettling = remember { mutableStateOf(false) }
 
     // Measured height of the sheet, published by BoxWithConstraints below. Needed
@@ -307,13 +305,16 @@ internal fun PlayerScreen(
     val dismissToHome: () -> Unit = {
         if (!isSettling.value) {
             isSettling.value = true
-            scope.launch {
-                // Height is published by the layout; if it is still unknown the
-                // overlay is simply removed rather than animating to zero.
-                val target = sheetHeightPx.floatValue
-                if (target > 0f) {
-                    offsetY.animateTo(target, MilanMotion.Exit)
-                }
+            // Height is published by the layout; if it is still unknown the overlay is
+            // simply removed rather than animating to zero.
+            val target = sheetHeightPx.floatValue
+            if (target > 0f) {
+                // `onFinished`, not "await then call": the overlay may only be removed
+                // once the sheet has actually left the screen. `DragOffset` skips the
+                // callback when the animation is interrupted, so a torn-down slide-out
+                // cannot pull the page out from under the next one.
+                offsetY.animateTo(target, MilanMotion.Exit) { onBack() }
+            } else {
                 onBack()
             }
         }
@@ -356,9 +357,10 @@ internal fun PlayerScreen(
                     onDragStart = { },
                     onVerticalDrag = { change, dragAmount ->
                         if (!isSettling.value) {
-                            scope.launch {
-                                offsetY.snapTo((offsetY.value + dragAmount).coerceAtLeast(0f))
-                            }
+                            // 同步写入，见 [DragOffset]：松手那一刻读到的就是手指停下的
+                            // 位置。走 `scope.launch { snapTo }` 时，同一批指针事件里的
+                            // `onDragEnd` 看到的是上一批的位移。
+                            offsetY.set((offsetY.value + dragAmount).coerceAtLeast(0f))
                         }
                         change.consume()
                     },
@@ -370,22 +372,12 @@ internal fun PlayerScreen(
                             )
                             dismissToHome()
                         } else {
-                            scope.launch {
-                                offsetY.animateTo(
-                                    0f,
-                                    MilanMotion.Sheet,
-                                )
-                            }
+                            offsetY.animateTo(0f, MilanMotion.Sheet)
                         }
                     },
                     onDragCancel = {
                         if (!isSettling.value) {
-                            scope.launch {
-                                offsetY.animateTo(
-                                    0f,
-                                    MilanMotion.Sheet,
-                                )
-                            }
+                            offsetY.animateTo(0f, MilanMotion.Sheet)
                         }
                     },
                 )
@@ -421,11 +413,16 @@ internal fun PlayerScreen(
                 progress.collect { event ->
                     val isIntermediate = event.progress > 0f && event.progress < 1f
                     if (isIntermediate) {
-                        offsetY.snapTo(event.progress * sheetHeightPx.floatValue)
+                        offsetY.set(event.progress * sheetHeightPx.floatValue)
                     }
                 }
             } catch (cancellation: CancellationException) {
                 // The gesture was released before committing: put the sheet back.
+                //
+                // 这一句必须落在**组合作用域**上（[DragOffset.animateTo] 就是），不能
+                // 在当前协程里 await：这个 catch 拿到的已经是一个被取消的协程，第一帧
+                // 就会抛 CancellationException，位移留在原地 —— 预测式返回松手后播放页
+                // 卡在半途，只剩一半在屏幕上。
                 offsetY.animateTo(0f, MilanMotion.Sheet)
                 throw cancellation
             }
