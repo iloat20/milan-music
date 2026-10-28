@@ -53,7 +53,12 @@ Media3 会传递引入 `INTERNET` 与 `ACCESS_NETWORK_STATE`，清单里用 `too
 
 ## 构建
 
-前置：JDK 17、Android SDK（platform 37）、`ANDROID_HOME` 或 `local.properties` 中的 `sdk.dir`。
+前置：**JDK 17**、Android SDK（platform 37 / build-tools 37.0.0）、`ANDROID_HOME` 或 `local.properties` 中的 `sdk.dir`。
+
+`JAVA_HOME` 必须指向一个完整的 JDK。两个容易踩的坑：
+
+- 未设置 `JAVA_HOME` 时 `./gradlew` 直接报 `JAVA_HOME is not set`，连 wrapper 都起不来。
+- Android Studio 自带的 `jbr` 不一定完整。若 `jbr/lib/` 下只有 `jrt-fs.jar` 和 `modules`、没有 `jvm.cfg`，`java` 会报 `could not open .../lib/jvm.cfg` —— 这种情况下 IDE 能构建而命令行不能，别把两者混为一谈。
 
 ```bash
 git clone git@github.com:iloat20/milan-music.git
@@ -61,6 +66,9 @@ cd milan-music
 
 # 指向本机 SDK（不要提交这个文件）
 echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+
+# 指向完整 JDK；路径按本机实际位置改
+export JAVA_HOME=/path/to/jdk-17
 
 ./gradlew :app:assembleDebug
 ```
