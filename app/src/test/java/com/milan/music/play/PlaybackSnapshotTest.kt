@@ -178,4 +178,29 @@ class PlaybackSnapshotTest {
         assertTrue(positionMatchesQueue(4, 1_000L, null, 1_500L))
         assertFalse(positionMatchesQueue(4, 1_000L, null, 900L))
     }
+
+    /**
+     * 全量写跨两个文件：ids 先落盘、游标后落盘。进程在中间被杀时，新 ids 配旧游标，
+     * 旧 index 可能指向另一首。revision 是唯一精确判据。
+     */
+    @Test
+    fun `a cursor is only used when it belongs to the stored queue`() {
+        assertTrue(cursorBelongsToQueue(queueRevision = 7L, cursorRevision = 7L))
+        assertFalse(cursorBelongsToQueue(queueRevision = 7L, cursorRevision = 6L))
+        assertFalse(cursorBelongsToQueue(queueRevision = 7L, cursorRevision = null))
+    }
+
+    @Test
+    fun `a snapshot without a revision still trusts its cursor`() {
+        // 旧布局里游标和 ids 在同一个文件里，天然原子，没有 revision 可比。
+        assertTrue(cursorBelongsToQueue(queueRevision = null, cursorRevision = null))
+        assertTrue(cursorBelongsToQueue(queueRevision = null, cursorRevision = 3L))
+    }
+
+    @Test
+    fun `a revision increases even when the clock moves backwards`() {
+        assertEquals(1_001L, bumpRevision(previous = 1_000L, now = 900L))
+        assertEquals(1_001L, bumpRevision(previous = 1_000L, now = 1_000L))
+        assertEquals(2_000L, bumpRevision(previous = 1_000L, now = 2_000L))
+    }
 }

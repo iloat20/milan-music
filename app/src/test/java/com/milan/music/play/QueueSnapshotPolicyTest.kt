@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * A track change rewrites the whole persisted queue today, which is 12 KB of ids on a
+ * A track change used to rewrite the whole persisted queue, which is 12 KB of ids on a
  * 1 233-track library plus two atomic DataStore edits — for a queue whose structure did
  * not change. These tests pin the narrower write the transition path is allowed to do.
  */
@@ -22,7 +22,7 @@ class QueueSnapshotPolicyTest {
     @Test
     fun `transition after a written queue only moves the cursor`() {
         val policy = QueueSnapshotPolicy()
-        policy.onIdsPersisted()
+        policy.onIdsPersisted(policy.currentStructureVersion())
 
         assertEquals(QueueSnapshotScope.CURSOR, policy.scopeForTransition())
     }
@@ -32,7 +32,7 @@ class QueueSnapshotPolicyTest {
         // addMediaItems / removeMediaItem / moveMediaItems all land here. A cursor-only
         // write on top of a stale id list would restore the wrong index.
         val policy = QueueSnapshotPolicy()
-        policy.onIdsPersisted()
+        policy.onIdsPersisted(policy.currentStructureVersion())
         policy.onTimelineChanged()
 
         assertEquals(QueueSnapshotScope.FULL, policy.scopeForTransition())
@@ -41,13 +41,28 @@ class QueueSnapshotPolicyTest {
     @Test
     fun `the structure is clean again once the rewrite landed`() {
         val policy = QueueSnapshotPolicy()
-        policy.onIdsPersisted()
+        policy.onIdsPersisted(policy.currentStructureVersion())
         policy.onTimelineChanged()
         assertEquals(QueueSnapshotScope.FULL, policy.scopeForTransition())
 
-        policy.onIdsPersisted()
+        policy.onIdsPersisted(policy.currentStructureVersion())
 
         assertEquals(QueueSnapshotScope.CURSOR, policy.scopeForTransition())
+    }
+
+    @Test
+    fun `a timeline change during the rewrite keeps the next transition full`() {
+        // The write captures the version, a playlist change arrives while it is on IO,
+        // and then the older write succeeds. Clearing the flag would let the next
+        // transition put a cursor on the ids of the previous queue.
+        val policy = QueueSnapshotPolicy()
+        policy.onIdsPersisted(policy.currentStructureVersion())
+
+        val version = policy.currentStructureVersion()
+        policy.onTimelineChanged()
+        policy.onIdsPersisted(version)
+
+        assertEquals(QueueSnapshotScope.FULL, policy.scopeForTransition())
     }
 
     @Test

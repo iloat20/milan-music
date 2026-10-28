@@ -54,6 +54,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Hosts the ExoPlayer instance in a foreground service so playback survives
@@ -143,6 +144,18 @@ class PlaybackService : MediaLibraryService() {
     private var replayGainGeneration = 0
 
     /**
+     * Serialises queue metadata resolution so command order survives the thread hop.
+     *
+     * Media3 applies the future returned by `onAddMediaItems` on the *completion* order,
+     * not on the call order. Two queues resolved concurrently could therefore let an
+     * `addMediaItems` land before the `setMediaItems` it was issued after, and the add
+     * would be replaced by the full queue. Coroutines launched on the main thread start
+     * in call order and this mutex is FIFO, so holding it until the future completes
+     * restores the ordering the old synchronous version had.
+     */
+    private val queueMetadataLock = Mutex()
+
+    /**
      * Queue metadata, resolved on demand instead of shipped with every item.
      *
      * [PlayerController.playQueue] hands the session bare `mediaId` + `uri` items.
@@ -167,31 +180,41 @@ class PlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
         ): ListenableFuture<List<MediaItem>> {
-            // One lookup per item, counted while resolving rather than re-probing
-            // `mediaMetadata` afterwards: a MediaItem always carries a (possibly
-            // empty) metadata object, so null-checking it proves nothing.
-            var hits = 0
-            val resolved = mediaItems.map { item ->
-                // The app's own queue is already in the index. Items that came from a
-                // library browser are not: the tree built them, and the controller has
-                // never seen a playQueue call. Seeding the index here is what lets the
-                // in-app player screen show the same title/artwork/neighbours.
-                val track = trackIndex?.get(item.mediaId)
-                    ?: libraryTree?.cachedTrack(item.mediaId)
-                if (track == null) {
-                    item
-                } else {
-                    hits++
-                    trackIndex?.put(track)
-                    item.withMetadata(track)
+            // For an in-app `playQueue` this list is the whole library: media3's default
+            // `onSetMediaItems` forwards every item it was given, so the work below is
+            // O(n), not O(1). Running it inside this callback means running it on the
+            // application looper, which is the thread composing the frame the user is
+            // waiting on. Dispatch it instead; the session still waits for the future,
+            // and [queueMetadataLock] keeps concurrent resolutions in call order.
+            val future = SettableFuture.create<List<MediaItem>>()
+            serviceScope.launch {
+                try {
+                    queueMetadataLock.withLock {
+                        val startedAtMs = SystemClock.elapsedRealtime()
+                        val resolved = try {
+                            withContext(Dispatchers.Default) { resolveQueueMetadata(mediaItems) }
+                        } catch (e: CancellationException) {
+                            // Cancelled mid-resolution while the service is going away.
+                            // Complete anyway: a caller blocked on this future must not hang.
+                            mediaItems
+                        } catch (e: Exception) {
+                            Log.w(TAG, "queue metadata resolution failed", e)
+                            mediaItems
+                        }
+                        Log.i(
+                            TAG,
+                            "queue metadata resolved ${mediaItems.size} items " +
+                                "in ${SystemClock.elapsedRealtime() - startedAtMs} ms",
+                        )
+                        future.set(resolved)
+                    }
+                } catch (e: CancellationException) {
+                    // Cancelled while queued behind another resolution; its body never
+                    // ran, so nothing has completed this future yet.
+                    future.set(mediaItems)
                 }
             }
-            // The counter is the only evidence that the index lookup works. A miss is
-            // otherwise invisible: the items still play, they just show no title,
-            // artist or artwork in the notification and lock screen. `resolved=0/N` is
-            // the signature of a broken same-process assumption (see PlaybackTrackIndex).
-            Log.i(TAG, "queue metadata resolved $hits/${mediaItems.size}")
-            return Futures.immediateFuture(resolved)
+            return future
         }
 
         /**
@@ -318,6 +341,36 @@ class PlaybackService : MediaLibraryService() {
     private fun MediaItem.withMetadata(track: Track): MediaItem = buildUpon()
         .setMediaMetadata(track.toMediaMetadata())
         .build()
+
+    /**
+     * Attaches metadata to every item of a queue, on whatever thread the caller chose.
+     *
+     * The app's own queue is already in [PlaybackTrackIndex]. Items that came from a
+     * library browser are not: the tree built them, and the controller has never seen a
+     * `playQueue` call. Seeding the index here is what lets the in-app player screen show
+     * the same title/artwork/neighbours.
+     *
+     * The hit counter is the only evidence that the index lookup works. A miss is
+     * otherwise invisible: the items still play, they just show no title, artist or
+     * artwork in the notification and lock screen. `0/N` is the signature of a broken
+     * same-process assumption (see [PlaybackTrackIndex]).
+     */
+    private fun resolveQueueMetadata(mediaItems: List<MediaItem>): List<MediaItem> {
+        var hits = 0
+        val resolved = mediaItems.map { item ->
+            val track = trackIndex?.get(item.mediaId)
+                ?: libraryTree?.cachedTrack(item.mediaId)
+            if (track == null) {
+                item
+            } else {
+                hits++
+                trackIndex?.put(track)
+                item.withMetadata(track)
+            }
+        }
+        Log.i(TAG, "queue metadata hits=$hits/${mediaItems.size}")
+        return resolved
+    }
 
     private fun Track.toMediaMetadata(): MediaMetadata = MediaMetadata.Builder()
         .setTitle(titleText(this@PlaybackService))
@@ -486,6 +539,20 @@ class PlaybackService : MediaLibraryService() {
         scope: QueueSnapshotScope = QueueSnapshotScope.FULL,
     ): Unit = snapshotWriteLock.withLock { persistQueueLocked(player, scope) }
 
+    /**
+     * A track change whose scope is decided when the write actually runs.
+     *
+     * `playQueue` produces a timeline change and a transition back to back. The timeline
+     * write is queued first and, because [snapshotWriteLock] is FIFO, lands first; asking
+     * [QueueSnapshotPolicy] at callback time would still see the structure dirty and
+     * rewrite every id a second time. Asking under the lock sees the acknowledgement and
+     * moves only the cursor.
+     */
+    private suspend fun persistQueueAtTransition(player: Player) =
+        snapshotWriteLock.withLock {
+            persistQueueLocked(player, queueSnapshotPolicy.scopeForTransition())
+        }
+
     private suspend fun persistQueueLocked(
         player: Player,
         scope: QueueSnapshotScope,
@@ -504,6 +571,9 @@ class PlaybackService : MediaLibraryService() {
             }
             return
         }
+        // Captured before the player is read: a timeline change that arrives while this
+        // write is on IO must keep the structure dirty even after the write succeeds.
+        val structureVersion = queueSnapshotPolicy.currentStructureVersion()
         val ids = ArrayList<Long>(count)
         var current = -1
         for (index in 0 until count) {
@@ -530,7 +600,7 @@ class PlaybackService : MediaLibraryService() {
         if (saved) {
             // Acknowledgement, not attempt: a failed write leaves the structure dirty
             // so the next transition retries the full form.
-            queueSnapshotPolicy.onIdsPersisted()
+            queueSnapshotPolicy.onIdsPersisted(structureVersion)
             Log.d(TAG, "snapshot saved tracks=${ids.size} index=$current")
         }
     }
@@ -873,9 +943,8 @@ class PlaybackService : MediaLibraryService() {
         })
 
         // Snapshot writes. Only a timeline change can move the item list itself, so only
-        // that path re-encodes every id; a track change writes the cursor. Before 1.0.67
-        // both did the full form, which on a 1 233-track library meant a ~12 KB string
-        // and two atomic file rewrites per transition — for an unchanged queue.
+        // that path re-encodes every id; a track change writes the cursor, which now
+        // shares the position store's small file instead of rewriting the id list.
         player.addListener(object : Player.Listener {
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
                 queueSnapshotPolicy.onTimelineChanged()
@@ -888,14 +957,14 @@ class PlaybackService : MediaLibraryService() {
                     playWhenReady = player.playWhenReady,
                     isPlaying = player.isPlaying,
                 )?.let { reportTrackStart(it, player) }
-                // Evaluated on the callback thread, but persistCursor re-reads the index
-                // when the write actually runs: a queued full write from a timeline
-                // change arriving afterwards therefore cannot be undone by a stale cursor.
-                val scope = queueSnapshotPolicy.scopeForTransition()
-                serviceScope.launch {
-                    persistQueue(player, scope)
-                    persistPosition(player)
-                }
+                // Decided when the write runs, not here: the FULL write queued by the
+                // timeline change that caused this transition may still be ahead of it,
+                // in which case only the cursor needs to move. See
+                // [persistQueueAtTransition].
+                //
+                // No separate position write: both snapshot scopes carry the position
+                // next to the cursor, and the two are written in one edit.
+                serviceScope.launch { persistQueueAtTransition(player) }
                 // A ramp for the previous track must not keep writing.
                 val gainGeneration = ++replayGainGeneration
                 serviceScope.launch { applyReplayGain(player, gainGeneration) }
@@ -925,19 +994,24 @@ class PlaybackService : MediaLibraryService() {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
-                    serviceScope.launch {
-                        persistQueue(player)
-                        persistPosition(player)
-                    }
+                    // persistQueue writes the position with the queue; a second write
+                    // would only duplicate the same values.
+                    serviceScope.launch { persistQueue(player) }
                 }
             }
 
+            /**
+             * Shuffle and repeat do not change the ids — only the flags the cursor
+             * already carries. Writing the full queue here re-encoded and re-wrote the
+             * whole id list for a one-byte change, and `playQueue` triggers it on every
+             * start because it pins shuffle on.
+             */
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                serviceScope.launch { persistQueue(player) }
+                serviceScope.launch { persistQueue(player, QueueSnapshotScope.CURSOR) }
             }
 
             override fun onRepeatModeChanged(repeatMode: Int) {
-                serviceScope.launch { persistQueue(player) }
+                serviceScope.launch { persistQueue(player, QueueSnapshotScope.CURSOR) }
             }
         })
 
