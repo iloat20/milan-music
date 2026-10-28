@@ -1,0 +1,181 @@
+name: CI
+
+# 这个仓库原来的门禁全靠手工：282 例单测、lintRelease、apksigner / zipalign / badging
+# 与 SHA-256 都在本机终端里跑。严谨度不缺，缺的是**不可跳过性** —— 某天漏跑一次，
+# 回归就静默入库了。这里把它变成 push 的硬前置。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # AGP 9.4.1 要求 JDK 17。不用 runner 默认的 java：版本随镜像漂移，
+  # 而 Kotlin 2.4 / AGP 9 对 JDK 版本是硬要求。
+  JAVA_VERSION: "17"
+  BUILD_TOOLS: "37.0.0"
+
+jobs:
+  gate:
+    name: 门禁（单测 + lint + 零警告）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: android-actions/setup-android@v3
+
+      # compileSdk 37 对应的 platform 目录是 android-37.0，镜像里通常没有。
+      # 装失败不致命：下面的 -Pandroid.builder.sdkDownload=true 会让 AGP 自己补。
+      - name: 安装 SDK 组件
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;${BUILD_TOOLS}" || true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 单测与 lint
+        # --rerun-tasks 是刻意的：任务命中构建缓存时会显示 UP-TO-DATE 而根本不执行，
+        # 改过测试也照样"绿"。门禁要的是执行过的结果，不是缓存里旧的结果。
+        run: |
+          set -o pipefail
+          ./gradlew :app:testDebugUnitTest :app:lintRelease \
+            --rerun-tasks --console=plain --stacktrace \
+            -Pandroid.builder.sdkDownload=true 2>&1 | tee gradle.log
+
+      - name: 断言零 Kotlin 警告
+        run: |
+          # 唯一允许的 warning 是 uses-permission#INTERNET（隐私护栏，见 README）。
+          # 它来自 manifest 合并，不出现在 Kotlin 的 `w:` 行里。
+          if grep -qE '^w: ' gradle.log; then
+            echo "::error::Kotlin 编译产生警告，门禁要求零 w:"
+            grep -E '^w: ' gradle.log | head -50
+            exit 1
+          fi
+          echo "zero Kotlin warnings"
+
+      - name: 失败时留档
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs
+          path: |
+            gradle.log
+            app/build/reports/lint-results-release.html
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/
+          retention-days: 14
+
+  release:
+    name: release 包与产物校验
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: gate
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_PATH: ${{ github.workspace }}/.keystore/milanmusic-release.keystore
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 组件
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;${BUILD_TOOLS}" || true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # 签名材料走 secrets，不落仓库。keystore 本身是二进制，用 base64 传输。
+      - name: 恢复签名材料
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::缺少 secrets.KEYSTORE_BASE64，release 包无法签名"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$KEYSTORE_PATH")" "$HOME/.android"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+          # build.gradle.kts 读的是 ~/.android/milanmusic-release.keystore，写这个路径。
+          cp "$KEYSTORE_PATH" "$HOME/.android/milanmusic-release.keystore"
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "KEYSTORE_STORE_PASSWORD=$KEYSTORE_STORE_PASSWORD"
+            echo "KEYSTORE_KEY_PASSWORD=$KEYSTORE_KEY_PASSWORD"
+          } > local.properties
+
+      - name: 出包
+        run: ./gradlew :app:assembleRelease --console=plain -Pandroid.builder.sdkDownload=true
+
+      # 每一条都是 release 包的判据，任何一条不成立就说明装错了包。
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          [ -f "$APK" ] || { echo "::error::没有产出 $APK"; exit 1; }
+
+          SIZE=$(stat -c %s "$APK")
+          SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          echo "size=$SIZE sha256=$SHA"
+
+          # 体积护栏。现值约 2.3 MB；这条线是"明显变大"的告警，不是目标值。
+          MAX=3000000
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "::error::APK $SIZE B 超过上限 $MAX B"
+            exit 1
+          fi
+
+          # v2/v3 必须有；debug 证书说明装成了第二个图标。
+          "$BT/apksigner" verify --verbose "$APK" | tee sign.txt
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" sign.txt
+          grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" sign.txt
+          if "$BT/apksigner" verify --print-certs "$APK" | grep -q "Android Debug"; then
+            echo "::error::APK 用的是 debug 证书"
+            exit 1
+          fi
+
+          "$BT/zipalign" -c -P 16 -v 4 "$APK" > /dev/null
+
+          "$BT/aapt2" dump badging "$APK" | tee badging.txt
+          grep -q "package: name='com.milan.music'" badging.txt
+          # release 只允许 arm64-v8a。debug 保留四 ABI 供模拟器，不走这里。
+          grep -q "native-code: 'arm64-v8a'" badging.txt
+          if grep -q "native-code:.*'armeabi-v7a'\|native-code:.*'x86" badging.txt; then
+            echo "::error::release 包里混进了非 arm64 的 ABI"
+            exit 1
+          fi
+
+          {
+            echo "### release 产物"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 体积 | $SIZE B |"
+            echo "| SHA-256 | \`$SHA\` |"
+            echo "| 签名 | v2 + v3 |"
+            echo "| ABI | arm64-v8a |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
