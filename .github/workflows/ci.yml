@@ -35,11 +35,14 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       # compileSdk 37 对应的 platform 目录是 android-37.0，镜像里通常没有。
-      # 装失败不致命：下面的 -Pandroid.builder.sdkDownload=true 会让 AGP 自己补。
+      # 逐个装、各自容错：任何一条包名不存在都不该拦住后面的步骤。
+      # 真装不上也不致命，下面的 -Pandroid.builder.sdkDownload=true 会让 AGP 自己补。
       - name: 安装 SDK 组件
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "build-tools;${BUILD_TOOLS}" || true
+          for pkg in "platforms;android-37" "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
+            sdkmanager "$pkg" || echo "sdkmanager $pkg 未安装，交给 AGP 自动下载"
+          done
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -95,7 +98,9 @@ jobs:
       - name: 安装 SDK 组件
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "build-tools;${BUILD_TOOLS}" || true
+          for pkg in "platforms;android-37" "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
+            sdkmanager "$pkg" || echo "sdkmanager $pkg 未安装，交给 AGP 自动下载"
+          done
 
       - uses: gradle/actions/setup-gradle@v4
 
