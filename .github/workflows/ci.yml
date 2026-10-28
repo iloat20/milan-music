@@ -54,8 +54,9 @@ jobs:
             exit 0
           fi
           yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
-          # compileSdk 37 的 platform 目录名是 android-37.0，与包名不一定同名，两个都试。
-          for pkg in "platforms;android-37" "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
+          # compileSdk 37 的 platform 包名是 platforms;android-37.0（带 minor）。
+          # 实测 platforms;android-37 不存在，写上只会每次 CI 多一条 warning。
+          for pkg in "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
             "$SDKMGR" "$pkg" || echo "::warning::$pkg 未装上，交给 AGP 自补"
           done
 
@@ -133,7 +134,7 @@ jobs:
             exit 0
           fi
           yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
-          for pkg in "platforms;android-37" "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
+          for pkg in "platforms;android-37.0" "build-tools;${BUILD_TOOLS}"; do
             "$SDKMGR" "$pkg" || echo "::warning::$pkg 未装上，交给 AGP 自补"
           done
 
