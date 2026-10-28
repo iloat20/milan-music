@@ -25,7 +25,7 @@ jobs:
     name: 门禁（单测 + lint + 零警告）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-java@v5
         with:
@@ -60,7 +60,7 @@ jobs:
             "$SDKMGR" "$pkg" || echo "::warning::$pkg 未装上，交给 AGP 自补"
           done
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
 
       - name: 单测与 lint
         # --rerun-tasks 是刻意的：任务命中构建缓存时会显示 UP-TO-DATE 而根本不执行，
@@ -93,7 +93,7 @@ jobs:
 
       - name: 失败时留档
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: gate-logs
           path: |
@@ -112,7 +112,7 @@ jobs:
     env:
       KEYSTORE_PATH: ${{ github.workspace }}/.keystore/milanmusic-release.keystore
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-java@v5
         with:
@@ -138,7 +138,7 @@ jobs:
             "$SDKMGR" "$pkg" || echo "::warning::$pkg 未装上，交给 AGP 自补"
           done
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
 
       # 签名材料走 secrets，不落仓库。keystore 本身是二进制，用 base64 传输。
       - name: 恢复签名材料
@@ -220,7 +220,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: release-apk
           path: app/build/outputs/apk/release/app-release.apk
