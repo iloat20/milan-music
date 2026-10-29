@@ -120,7 +120,9 @@ jobs:
           MANIFEST=$(find app/build/intermediates -path "*release*" -name AndroidManifest.xml -print -quit)
           if [ -z "$MANIFEST" ]; then
             echo "::error::找不到合并后的 release 清单，processReleaseMainManifest 没有产出"
-            find app/build/intermediates -name AndroidManifest.xml | head -20
+            # 同为 pipefail 场景：head 关闭管道会让 find 以 141 退出，set -e 抢先于 exit 1
+            # 生效，步骤就变成"失败但看不出为什么"。诊断输出不参与退出码。
+            find app/build/intermediates -name AndroidManifest.xml | head -20 || true
             exit 1
           fi
           echo "manifest=$MANIFEST"
