@@ -24,6 +24,7 @@ dist/icon-export/
 
 # --- 取证/预览中间图（review 只入库 .md 结论与 .py 生成脚本）---
 review/*.png
+review/raw/
 screenshots/*.png
 
 # --- IDE / 系统 ---
