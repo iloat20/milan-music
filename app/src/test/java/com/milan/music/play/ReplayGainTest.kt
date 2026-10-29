@@ -3,6 +3,7 @@ package com.milan.music.play
 import java.io.ByteArrayOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -116,16 +117,39 @@ class ReplayGainReadLimitTest {
     @Test
     fun `an oversized id3 tag is capped`() {
         // The declared size is attacker-controlled in the sense that it comes from a
-        // file the app did not write; a 2 GB declaration must not become a 2 GB array.
+        // file the app did not write; a 2 GB declaration must not become a 2 GB window.
+        // Anything above the small window is streamed instead of buffered, so this cap
+        // is also the point where the reader switches paths.
         val huge = "ID3".toByteArray() +
             byteArrayOf(3, 0, 0) +
             byteArrayOf(0x1F, 0x7F, 0x7F, 0x7F)
-        assertEquals(ReplayGainTags.MAX_ID3_BYTES, ReplayGainTags.readLimitFor(huge))
+        assertEquals(Id3StreamReader.MAX_TAG_BYTES, ReplayGainTags.readLimitFor(huge))
     }
 
     @Test
     fun `truncated input falls back to the small window`() {
         assertEquals(ReplayGainTags.SMALL_HEAD_BYTES, ReplayGainTags.readLimitFor(byteArrayOf(0x49)))
+    }
+
+    /**
+     * The reader picks between buffering the tag and streaming its frame table from
+     * this number. If the cap ever collapsed to [ReplayGainTags.SMALL_HEAD_BYTES],
+     * every tag with cover art would silently go back to being loaded whole — a
+     * regression no correctness test would catch, because both paths return the same
+     * gain.
+     */
+    @Test
+    fun `a tag above the small window asks for the streamed path`() {
+        assertTrue(
+            ReplayGainTags.readLimitFor(id3WithCoverArt(300 * 1024)) > ReplayGainTags.SMALL_HEAD_BYTES,
+        )
+    }
+
+    @Test
+    fun `a tag inside the small window stays buffered`() {
+        assertTrue(
+            ReplayGainTags.readLimitFor(id3WithCoverArt(1024)) <= ReplayGainTags.SMALL_HEAD_BYTES,
+        )
     }
 }
 
@@ -264,6 +288,26 @@ private fun id3(gain: String?, version: Int, extraText: String = ""): ByteArray 
         write(0) // flags
         write(syncSafe(frames.size))
         write(frames)
+    }.toByteArray()
+}
+
+/** An ID3v2.3 tag whose only frame is cover art of [bytes] bytes. */
+private fun id3WithCoverArt(bytes: Int): ByteArray {
+    val apic = ByteArrayOutputStream().apply {
+        write("APIC".toByteArray())
+        writeBe32(bytes)
+        write(0)
+        write(0) // flags
+        write(ByteArray(bytes))
+    }.toByteArray()
+
+    return ByteArrayOutputStream().apply {
+        write("ID3".toByteArray())
+        write(3)
+        write(0)
+        write(0) // flags
+        write(syncSafe(apic.size))
+        write(apic)
     }.toByteArray()
 }
 

@@ -31,36 +31,35 @@ internal object ReplayGainTags {
     /** How much to read from a file whose container puts its comments near the start. */
     const val SMALL_HEAD_BYTES = 64 * 1024
 
-    /** Ceiling for an ID3v2 tag that declares a larger size than [SMALL_HEAD_BYTES]. */
-    const val MAX_ID3_BYTES = 1024 * 1024
-
     /**
-     * How many bytes [parse] needs, given the first few bytes of the file.
+     * How large the head window would have to be, given the first few bytes of the file.
      *
-     * FLAC and Ogg put their comments immediately after the stream info, so a fixed
-     * small window covers them. ID3v2 declares its own size and frequently carries
-     * cover art ahead of the `TXXX` frames, which is exactly the case a fixed window
-     * would miss — on a library where every album has artwork, that would mean
-     * ReplayGain silently applied to almost nothing.
+     * A return value above [SMALL_HEAD_BYTES] is also the reader's signal to stream the
+     * tag instead of buffering it: an ID3v2 tag frequently carries cover art ahead of
+     * the `TXXX` frames, which is exactly the case a fixed window would miss — on a
+     * library where every album has artwork, that would mean ReplayGain silently
+     * applied to almost nothing. Reading such a tag into an array costs a full tag's
+     * worth of memory to find a frame that is usually near the start, so
+     * [Id3StreamReader] walks the frame table on the stream instead.
      *
      * Capped because the declared size comes from the file: a corrupt or hostile header
-     * must not turn into a matching allocation.
+     * must not become an unbounded window either.
      */
     fun readLimitFor(head: ByteArray): Int {
         if (head.size < 10 || !head.startsWith(0, "ID3")) return SMALL_HEAD_BYTES
         val tagSize = readSyncSafe(head, 6) ?: return SMALL_HEAD_BYTES
-        return (tagSize + 10).coerceAtMost(MAX_ID3_BYTES)
+        return (tagSize + 10).coerceAtMost(Id3StreamReader.MAX_TAG_BYTES)
     }
 
     private const val FLAC_VORBIS_COMMENT_BLOCK = 4
-    private const val TRACK_GAIN_KEY = "replaygain_track_gain"
-    private const val ALBUM_GAIN_KEY = "replaygain_album_gain"
+    internal const val TRACK_GAIN_KEY = "replaygain_track_gain"
+    internal const val ALBUM_GAIN_KEY = "replaygain_album_gain"
 
     /**
      * Smallest valid ID3v2.4 extended header: four bytes of syncsafe size plus the
      * flag-byte count and flags. The size field includes itself, unlike v2.3.
      */
-    private const val MIN_V2_4_EXTENDED_HEADER = 6
+    internal const val MIN_V2_4_EXTENDED_HEADER = 6
 
     /** Guards against a corrupt tag asking for an inaudible or absurd correction. */
     private const val MAX_PLAUSIBLE_DB = 60f
@@ -260,7 +259,7 @@ internal object ReplayGainTags {
      * `StringIndexOutOfBoundsException`. That exception is not caught anywhere above
      * this call: it would surface as a crash on the track-transition path.
      */
-    private fun parseUserText(bytes: ByteArray, start: Int, end: Int): Pair<String, String>? {
+    internal fun parseUserText(bytes: ByteArray, start: Int, end: Int): Pair<String, String>? {
         if (start >= end) return null
         val encoding = bytes[start].toInt() and 0xFF
         val bodyStart = start + 1
@@ -300,7 +299,7 @@ internal object ReplayGainTags {
      * `"-6.50 dB"` and `"-6.50"` both mean -6.5; anything else is a tag we do not
      * understand and must not act on.
      */
-    private fun parseGainDb(text: String): Float? {
+    internal fun parseGainDb(text: String): Float? {
         val trimmed = text.trim()
         val number = trimmed.takeWhile { it.isDigit() || it == '+' || it == '-' || it == '.' }
         val value = number.toFloatOrNull() ?: return null
@@ -341,7 +340,7 @@ private fun readBe24(bytes: ByteArray, offset: Int): Int? {
         (bytes[offset + 2].toInt() and 0xFF)
 }
 
-private fun readBe32(bytes: ByteArray, offset: Int): Int? {
+internal fun readBe32(bytes: ByteArray, offset: Int): Int? {
     if (offset + 4 > bytes.size) return null
     return ((bytes[offset].toInt() and 0xFF) shl 24) or
         ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
@@ -358,7 +357,7 @@ private fun readLe32(bytes: ByteArray, offset: Int, end: Int): Int? {
     return if (value < 0) null else value
 }
 
-private fun readSyncSafe(bytes: ByteArray, offset: Int): Int? {
+internal fun readSyncSafe(bytes: ByteArray, offset: Int): Int? {
     if (offset + 4 > bytes.size) return null
     var value = 0
     for (i in 0 until 4) {
