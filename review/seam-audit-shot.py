@@ -13,16 +13,52 @@
 """
 
 import sys
+
+# 缺参数就退出。这里的兜底原来指向一张 clipboard 临时图 —— 那是一张真实存在过的
+# 截图，于是"忘了给路径"和"给了路径"跑出来的是同一串数值，没人会发现验错了图。
+#
+# 校验放在 `from PIL import Image` 之前：否则缺依赖的环境会先抛 ModuleNotFoundError，
+# 把"忘了给路径"伪装成"环境没装好"。
+ARGS = sys.argv[1:]
+DP = 873 / 390.0          # 2.2385 px per dp，按 390dp 宽的参考机标定
+if "--density" in ARGS:
+    index = ARGS.index("--density")
+    if index + 2 > len(ARGS):
+        print("用法：--density <px per dp>", file=sys.stderr)
+        sys.exit(2)
+    try:
+        DP = float(ARGS[index + 1])
+    except ValueError:
+        print(f"--density 需要一个数字，收到 {ARGS[index + 1]!r}", file=sys.stderr)
+        sys.exit(2)
+    ARGS = ARGS[:index] + ARGS[index + 2:]
+
+if not ARGS:
+    print(
+        "用法：python review/seam-audit-shot.py <真机截图路径> [--density <px per dp>]",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 from PIL import Image
 
-SHOT = sys.argv[1] if len(sys.argv) > 1 else \
-    r"C:\Users\Administrator\.workbuddy\clipboard-images\clipboard-2026-10-23T04-20-55-054Z-c38b1ca2.jpg"
-DP = 873 / 390.0          # 2.2385 px per dp
+SHOT = ARGS[0]
 
 im = Image.open(SHOT).convert("L")
 W, H = im.size
 px = im.load()
-print(f"截图 {W}x{H}  density={DP:.3f}  64dp={64*DP:.0f}px  422dp={422*DP:.0f}px")
+DP_WIDTH = W / DP
+print(f"截图 {W}x{H}  density={DP:.3f}  宽 {DP_WIDTH:.0f}dp  64dp={64*DP:.0f}px  422dp={422*DP:.0f}px")
+
+# 下面的"理论位置 422dp""封面侧 64dp"全是按参考机标定的常量。换一台宽度的机器，
+# 它们就都不成立 —— 而输出依旧是一屏带小数点的数字，看不出错。宁可显式警告。
+if not 380 <= DP_WIDTH <= 400:
+    print(
+        f"\n警告：几何常量按 390dp 宽标定，这张图是 {DP_WIDTH:.0f}dp 宽 —— "
+        "dp↔px 换算不成立，下面的偏差与带宽数字不能直接套用。\n"
+        "      确认设备密度后用 --density 指定该机的 px/dp。",
+        file=sys.stderr,
+    )
 
 
 def row_rms(y0, y1):

@@ -65,10 +65,13 @@ jobs:
       - name: 单测与 lint
         # --rerun-tasks 是刻意的：任务命中构建缓存时会显示 UP-TO-DATE 而根本不执行，
         # 改过测试也照样"绿"。门禁要的是执行过的结果，不是缓存里旧的结果。
+        #
+        # processReleaseMainManifest 一并跑，是为了下一步的权限断言：合并后的清单是
+        # 权限护栏的判据，而它不需要先签出一个 APK。
         run: |
           set -o pipefail
           set +e
-          ./gradlew :app:testDebugUnitTest :app:lintRelease \
+          ./gradlew :app:testDebugUnitTest :app:lintRelease :app:processReleaseMainManifest \
             --rerun-tasks --console=plain --stacktrace \
             -Pandroid.builder.sdkDownload=true 2>&1 | tee gradle.log
           status=$?
@@ -90,6 +93,45 @@ jobs:
             exit 1
           fi
           echo "zero Kotlin warnings"
+
+      # 让门禁变绿最容易的方式是删掉失败的那个测试。这个下限只升不降：真要删，
+      # 就得同时改这里的数字 —— 那道摩擦是有意的。改测试后必须 --rerun-tasks 才会
+      # 产生新的 test-results，否则这里统计到的是上一轮的旧结果。
+      - name: 断言用例数不低于基线
+        run: |
+          set -euo pipefail
+          COUNT=$(python3 -c "import glob, xml.etree.ElementTree as ET; print(sum(int(ET.parse(p).getroot().get('tests', 0)) for p in glob.glob('app/build/test-results/testDebugUnitTest/*.xml')))")
+          echo "tests=$COUNT"
+          if [ "$COUNT" -lt 290 ]; then
+            echo "::error::用例数 $COUNT 低于基线 290 —— 有测试被删除，或测试根本没有执行"
+            ls app/build/test-results/testDebugUnitTest/ || true
+            exit 1
+          fi
+
+      # README 用整段篇幅承诺"只申请本地播放必需的权限、包里没有任何网络权限"，
+      # 而在此之前那条承诺只靠人工 `aapt2 dump permissions` 核对。谁误删 manifest 里
+      # 那行 tools:node="remove"，网络权限就静默漏进成品，单测与 lint 依然全绿。
+      # 这一步把那段文字变成退出码。
+      - name: 断言成品权限白名单
+        run: |
+          set -euo pipefail
+          # -print -quit 而不是 find | head -1：在 pipefail 下 head 提前关闭管道会让
+          # find 以 SIGPIPE(141) 退出，步骤会以一个没有原因的错误码失败。
+          MANIFEST=$(find app/build/intermediates -path "*release*" -name AndroidManifest.xml -print -quit)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::找不到合并后的 release 清单，processReleaseMainManifest 没有产出"
+            find app/build/intermediates -name AndroidManifest.xml | head -20
+            exit 1
+          fi
+          echo "manifest=$MANIFEST"
+          python3 review/check-shipped-permissions.py --manifest "$MANIFEST" | tee permissions.txt
+          {
+            echo "### 权限白名单"
+            echo ""
+            echo '```'
+            cat permissions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 失败时留档
         if: failure()
@@ -207,6 +249,11 @@ jobs:
             echo "::error::release 包里混进了非 arm64 的 ABI"
             exit 1
           fi
+
+          # gate 用合并清单早拦截，这里验的是真正要发出去的那个文件 —— 打包阶段的
+          # 任何介入（依赖变更、manifest 合并顺序）只在这份产物上看得见。
+          "$BT/aapt2" dump permissions "$APK" | tee permissions.txt
+          python3 review/check-shipped-permissions.py --stdin < permissions.txt
 
           {
             echo "### release 产物"

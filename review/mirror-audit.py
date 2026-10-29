@@ -13,6 +13,17 @@
 
 import sys
 
+# 缺参数就退出，不用默认路径。曾经这里的兜底是 "shot.jpg"：在别人的工作目录里
+# 它要么不存在（报一句 file not found），要么恰好存在一张无关的图 —— 后者会打印
+# 一整屏像模像样的 NCC 数值，而结论完全不属于要验的那张截图。取证工具用错输入，
+# 比取不到证更糟。
+#
+# 校验放在 `from PIL import Image` 之前：否则缺依赖的环境会先抛 ModuleNotFoundError，
+# 把"忘了给路径"伪装成"环境没装好"。
+if len(sys.argv) < 2:
+    print("用法：python review/mirror-audit.py <真机截图路径>", file=sys.stderr)
+    sys.exit(2)
+
 from PIL import Image
 
 W_SCALE = 4          # 缩小倍数，纯 Python 也能跑
@@ -83,4 +94,4 @@ def main(path):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "shot.jpg")
+    main(sys.argv[1])

@@ -32,10 +32,19 @@ POST_NOTIFICATIONS
 FOREGROUND_SERVICE
 FOREGROUND_SERVICE_MEDIA_PLAYBACK
 WAKE_LOCK
+com.milan.music.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
 ```
+
+最后一条不在 `AndroidManifest.xml` 里手写：它是 AndroidX core 为未导出的动态注册 receiver
+自动注入的包内自定义权限，不授予任何跨应用能力。列出来是为了让断言是「精确相等」——
+否则将来任何新增的传递权限都不会被发现。
 
 Media3 会传递引入 `INTERNET` 与 `ACCESS_NETWORK_STATE`，清单里用 `tools:node="remove"` 显式移除，
 所以包里没有任何网络权限——这一行同样是护栏：谁删掉它，权限就会漏进成品。
+
+这份清单不是文档，是**断言**：`review/check-shipped-permissions.py` 在每次 push 上核对合并后的
+清单，在 tag 上再对成品 APK 核对一次。多一条、少一条、或 `maxSdkVersion` 变了都会让 CI 变红。
+加权限是一次产品决定，得同时改这张表和脚本里的白名单。
 
 ## 技术栈
 
@@ -49,7 +58,7 @@ Media3 会传递引入 `INTERNET` 与 `ACCESS_NETWORK_STATE`，清单里用 `too
 | 构建 | AGP 9.4.1、Kotlin 2.4.21、Gradle 9.8.2、JDK 17 |
 | 平台 | minSdk 26 / targetSdk 37 / compileSdk 37 |
 
-主代码 44 个 Kotlin 文件、约 8.4k 行；`src/test` 11 个文件、93 个用例。
+主代码 68 个 Kotlin 文件、约 13.8k 行；`src/test` 39 个文件、295 个用例。
 
 ## 构建
 
@@ -124,7 +133,7 @@ app/src/main/java/com/milan/music/
 - **播放服务随进程存活**：启动即播意味着队列几乎总是非空，而 `MediaController` 是 bound client——服务不会随 UI 退出而销毁。这是「打开应用就开始放」的代价，不是遗漏；细节见 `PlayerController.onUiStopped` 的 KDoc。
 - **界面文案统一走 `values/strings.xml`**（1.0.63 起）：代码里不再有中文字面量，`Track` 与 `SortMode` 也不再自带文案——兜底文本由 `ui/text/TrackText.kt` 提供，因为排序与筛选要用**原值**，用显示文本等于让领域层依赖某一种语言。
 - **版本戳在曲库列表末尾**：`1.0.63 (64) · RELEASE`，由 `BuildConfig` 生成。装错包时滚到底就能看出来，不必再靠"体积变没变"推断。
-- **只有 JVM 单测，没有 `androidTest`**：`src/test` 覆盖封面几何、取色、缓存预算、倒影阶梯、图标墨色、封面归属与封面请求时序共 93 例。布局与手势仍需真机冒烟——第 55 批（叠层照实报高，把信息区全部挤出屏幕）和第 57 批（倒影内容错位，看起来像封面出现了两次）都属于只有 UI 测试才抓得住的那一类。
+- **只有 JVM 单测，没有 `androidTest`**：`src/test` 覆盖封面几何、取色、缓存预算、倒影阶梯、图标墨色、封面归属、封面请求时序、队列快照与 ReplayGain 帧表共 295 例。布局与手势仍需真机冒烟——第 55 批（叠层照实报高，把信息区全部挤出屏幕）和第 57 批（倒影内容错位，看起来像封面出现了两次）都属于只有 UI 测试才抓得住的那一类。
 
 ## 审查与迭代记录
 
